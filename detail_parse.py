@@ -30,7 +30,7 @@ VOID_TAGS = frozenset(
     }
 )
 
-CODE_RE = re.compile(r"\b([A-Z]{2,}-\d+)\b")
+CODE_RE = re.compile(r"(?<![A-Za-z0-9])\d*([A-Z]{2,}-?\d{2,})(?![A-Za-z0-9])")
 SIZE_HD_RE = re.compile(r"\[HD/\s*([\d.]+)\s*GB?\]", re.I)
 SIZE_MP4_RE = re.compile(r"\[MP4/\s*([\d.]+)\s*GB?\]", re.I)
 SIZE_PLAIN_RE = re.compile(r"【影片大小】[︰：:]\s*([\d.]+)\s*GB?", re.I)
@@ -42,6 +42,14 @@ CONTTPC_OPEN_RE = re.compile(
     r'<div\b[^>]*\bid\s*=\s*["\']conttpc["\'][^>]*>',
     re.I,
 )
+
+
+def _normalize_code(code: str) -> str:
+    """确保番号字母与数字间有连字符：TENN043 -> TENN-043。"""
+    m = re.match(r"^([A-Z]+)(\d+)$", code)
+    if m:
+        return f"{m.group(1)}-{m.group(2)}"
+    return code
 
 
 def strip_html_tags(fragment: str) -> str:
@@ -214,7 +222,7 @@ def parse_detail_signal(
         item["size_gb"] = _h4_size_gb(h4_text) or _size_gb_from_plain(plain)
         cm = CODE_RE.search(h4_text)
         if cm:
-            code = cm.group(1)
+            code = _normalize_code(cm.group(1))
             item["code"] = code
             rest = h4_text[cm.end() :].strip()
             item["title"] = rest or None
@@ -234,15 +242,15 @@ def _parse_series_block_text(block: str) -> Optional[Dict[str, Any]]:
     if not block:
         return None
     m = re.search(
-        r"(?m)^([A-Z]{2,}-\d+)\s+(.+?)(?=\n【發行日期】)",
+        r"(?m)^\d*([A-Z]{2,}-?\d{2,})\s+(.+?)(?=\n【發行日期】)",
         block,
         re.DOTALL,
     )
     if not m:
-        m = re.search(r"(?m)^([A-Z]{2,}-\d+)\s+(.+)$", block, re.DOTALL)
+        m = re.search(r"(?m)^\d*([A-Z]{2,}-?\d{2,})\s+(.+)$", block, re.DOTALL)
     if not m:
         return None
-    code, title_line = m.group(1), m.group(2).strip()
+    code, title_line = _normalize_code(m.group(1)), m.group(2).strip()
     title_line = re.sub(r"\s+", " ", title_line)
     actress_m = re.search(r"【演出女優】[︰：:]([^\n]+)", block)
     actress = actress_m.group(1).strip() if actress_m else None
@@ -328,11 +336,11 @@ def parse_detail_series(
     if m:
         body_plain = plain[m.end() :].lstrip()
 
-    chunks = re.split(r"(?=\n[A-Z]{2,}-\d+\s)", "\n" + body_plain.strip())
+    chunks = re.split(r"(?=\n\d*[A-Z]{2,}-?\d{2,}\s)", "\n" + body_plain.strip())
     blocks_text = [
         c.strip()
         for c in chunks
-        if c.strip() and re.match(r"^[A-Z]{2,}-\d+\s", c.strip(), re.M)
+        if c.strip() and re.match(r"^\d*[A-Z]{2,}-?\d{2,}\s", c.strip(), re.M)
     ]
     parsed_blocks = []
     for b in blocks_text:

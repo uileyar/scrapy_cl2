@@ -6,11 +6,15 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import re
 import sys
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.error import URLError
+from urllib.parse import urlparse, urlunparse
 from urllib.request import Request, urlopen
+
+log = logging.getLogger(__name__)
 
 _DEFAULT_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -62,6 +66,39 @@ def _safe_name(name: str) -> str:
     return name.strip() or "image.jpg"
 
 
+_MAGIC_EXT: list[tuple[bytes, str]] = [
+    (b"\x89PNG", ".png"),
+    (b"GIF87a", ".gif"),
+    (b"GIF89a", ".gif"),
+    (b"BM", ".bmp"),
+]
+
+
+def _detect_image_ext(data: bytes) -> str | None:
+    """识别 data 的真实图片格式，非图片返回 None。"""
+    if len(data) < 12:
+        return None
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return ".webp"
+    if data[:2] == b"\xff\xd8":
+        return ".jpg"
+    for magic, ext in _MAGIC_EXT:
+        if data[: len(magic)] == magic:
+            return ext
+    return None
+
+
+def _fix_ext_by_magic(name: str, data: bytes) -> str:
+    """根据文件内容的 magic bytes 修正扩展名。"""
+    real_ext = _detect_image_ext(data)
+    if real_ext is None:
+        return name
+    stem, cur_ext = Path(name).stem, Path(name).suffix
+    if cur_ext.lower() != real_ext:
+        return stem + real_ext
+    return name
+
+
 _WP_PROXY_RE = re.compile(r"^https?://i[0-3]\.wp\.com/", re.I)
 
 
@@ -72,6 +109,68 @@ def _unwrap_wp_proxy(url: str) -> str:
         parsed = urlparse(real)
         return parsed._replace(query="").geturl()
     return url
+
+
+_HOST_REPLACE: dict[str, str] = {
+    "picdcd.com": "odjsk.com",
+    "gdvdvb.com": "odjsk.com",
+    "adipcd.com": "odjsk.com",
+}
+
+
+def _replace_host(url: str) -> str:
+    """按映射表替换 URL 中的域名。"""
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    new_host = _HOST_REPLACE.get(host)
+    if new_host is None:
+        return url
+    netloc = parsed.netloc.replace(host, new_host, 1)
+    return urlunparse(parsed._replace(netloc=netloc))
+
+
+def _do_fetch(url: str, headers: dict[str, str]) -> tuple[bytes, str | None, str, str | None]:
+    """发起 GET 请求，返回 (data, content_disposition, final_url, content_type)。"""
+    req = Request(url, headers=headers, method="GET")
+    with urlopen(req, timeout=60) as resp:
+        return (
+            resp.read(),
+            resp.headers.get("Content-Disposition"),
+            resp.geturl(),
+            resp.headers.get("Content-Type"),
+        )
+
+
+def _fetch_with_http_fallback(url: str, headers: dict[str, str]) -> tuple[bytes, str | None, str, str | None]:
+    """尝试下载，HTTPS 失败则降级 HTTP 重试。"""
+    try:
+        return _do_fetch(url, headers)
+    except URLError as exc:
+        if not (url.startswith("https://") and isinstance(exc.reason, OSError)):
+            raise
+        http_url = url.replace("https://", "http://", 1)
+        log.warning("HTTPS 失败，降级 HTTP 重试: %s -> %s", url, http_url)
+        return _do_fetch(http_url, headers)
+
+
+def _fetch(url: str, headers: dict[str, str]) -> tuple[bytes, str | None, str, str | None]:
+    """下载图片，依次尝试: 原始URL → HTTP降级 → 域名替换 → 替换后HTTP降级。"""
+    alt_url = _replace_host(url)
+    has_alt = alt_url != url
+
+    try:
+        result = _fetch_with_http_fallback(url, headers)
+    except (URLError, OSError):
+        if not has_alt:
+            raise
+        log.warning("原始域名失败，尝试替换域名: %s -> %s", url, alt_url)
+        return _fetch_with_http_fallback(alt_url, headers)
+
+    if has_alt and not _detect_image_ext(result[0]):
+        log.warning("原始域名返回非图片数据，尝试替换域名: %s -> %s", url, alt_url)
+        return _fetch_with_http_fallback(alt_url, headers)
+
+    return result
 
 
 def download_image_from_url(
@@ -105,19 +204,22 @@ def download_image_from_url(
 
     headers = {
         "User-Agent": _DEFAULT_UA,
-        "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+        "Accept": "image/png,image/jpeg,image/gif,image/*;q=0.8",
     }
     if referer:
         headers["Referer"] = referer.strip()
     if session_headers:
         headers.update(session_headers)
 
-    req = Request(url, headers=headers, method="GET")
-    with urlopen(req, timeout=60) as resp:
-        data = resp.read()
-        cd = resp.headers.get("Content-Disposition")
-        final_url = resp.geturl()
-        ct = resp.headers.get("Content-Type")
+    data, cd, final_url, ct = _fetch(url, headers)
+
+    if not data:
+        raise ValueError(f"下载内容为空: {url}")
+    if _detect_image_ext(data) is None:
+        snippet = data[:64].decode("utf-8", errors="replace")
+        raise ValueError(
+            f"下载内容不是图片 ({len(data)} bytes, 开头: {snippet!r}): {url}"
+        )
 
     if filename:
         guessed = _guess_filename(final_url or url, ct)
@@ -128,6 +230,7 @@ def download_image_from_url(
         name = cd_name or _guess_filename(final_url or url, ct)
         name = _safe_name(name)
 
+    name = _fix_ext_by_magic(name, data)
     path = out_dir / name
     if path.exists():
         stem, suf = path.stem, path.suffix

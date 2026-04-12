@@ -27,6 +27,31 @@ from rmdown_download import download_from_rmdown_url
 
 log = logging.getLogger(__name__)
 
+SOURCE_URL_MAP: dict[str, str] = {
+    "zz": "https://www.t66y.com/thread0806.php?fid=26",
+    "ym": "https://www.t66y.com/thread0806.php?fid=15",
+}
+
+
+URL_SOURCE_MAP: dict[str, str] = {v: k for k, v in SOURCE_URL_MAP.items()}
+
+
+def resolve_url(source: str) -> str:
+    """从 source 标记查表得到列表 URL。"""
+    url = SOURCE_URL_MAP.get(source)
+    if not url:
+        valid = ", ".join(SOURCE_URL_MAP)
+        raise ValueError(f"未知的 source: {source!r}，可选值: {valid}")
+    return url
+
+
+def resolve_source(list_url: str) -> str:
+    """从列表 URL 查表得到 source 标记。"""
+    source = URL_SOURCE_MAP.get(list_url)
+    if not source:
+        raise ValueError(f"未知的 URL: {list_url}，请在 SOURCE_URL_MAP 中注册")
+    return source
+
 
 def _sanitize_dirname(name: str) -> str:
     """清理目录名，保留中日韩英数字和少量符号。"""
@@ -43,15 +68,16 @@ def _sanitize_filename(name: str) -> str:
 
 
 def crawl_pipeline(
-    list_url: str,
+    source: str,
     download_dir: Path,
     db_path: Path,
     max_pages: int,
     delay_sec: float,
     list_delay_sec: float,
 ) -> None:
+    list_url = resolve_url(source)
     today = datetime.now().strftime("%Y-%m-%d")
-    day_dir = download_dir / today
+    day_dir = download_dir / today / source
     day_dir.mkdir(parents=True, exist_ok=True)
 
     conn = ensure_db(db_path)
@@ -87,6 +113,7 @@ def crawl_pipeline(
                 thread["url"],
                 thread["title"],
                 thread["downloads"],
+                source=source,
                 status="pending",
             )
 
@@ -161,6 +188,7 @@ def crawl_pipeline(
                     img_path=img_path,
                     torrent_url=item.get("torrent_url"),
                     torrent_path=torrent_path,
+                    source=source,
                 )
 
                 if delay_sec > 0:
@@ -207,9 +235,15 @@ def parse_args() -> argparse.Namespace:
         description="列表页→详情页→图片/种子下载→SQLite"
     )
     p.add_argument(
+        "--source",
+        default="zz",
+        choices=list(SOURCE_URL_MAP),
+        help="数据源 (默认: zz)",
+    )
+    p.add_argument(
         "--url",
-        default="https://www.t66y.com/thread0806.php?fid=26",
-        help="列表页 URL",
+        default=None,
+        help="直接指定列表页 URL（优先于 --source）",
     )
     p.add_argument(
         "--download-dir",
@@ -246,9 +280,14 @@ def main() -> int:
 
     log.info("日志文件: %s", log_file)
 
+    if args.url:
+        source = resolve_source(args.url)
+    else:
+        source = args.source
+
     try:
         crawl_pipeline(
-            list_url=args.url,
+            source=source,
             download_dir=download_dir,
             db_path=db_path,
             max_pages=args.max_pages,
