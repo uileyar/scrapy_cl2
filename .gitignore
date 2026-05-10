@@ -3,3 +3,7 @@ __pycache__/
 
 output/
 sample/
+
+.claude/
+.cursor/hooks.json
+research/
