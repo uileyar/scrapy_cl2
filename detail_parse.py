@@ -191,11 +191,11 @@ def _size_gb_from_plain(plain: str) -> Optional[str]:
 
 
 def _actress_from_conttpc_plain(plain: str) -> Optional[str]:
-    """单番号帖正文常见「出演者：」；系列帖用 【演出女優】︰。"""
+    """单番号帖正文常见「出演者：」；字段标签多为 【演出女優】/【出演女優】，部分帖用简体 【出演女优】。"""
     m = re.search(r"出演者[：:]\s*([^\n\r<]+)", plain)
     if m:
         return m.group(1).strip()
-    m = re.search(r"【演出女優】[︰：:]([^\n]+)", plain)
+    m = re.search(r"【(?:演出|出演)女[優优]】[︰：:]([^【\n]+)", plain)
     if not m:
         return None
     a = m.group(1).strip()
@@ -252,7 +252,7 @@ def _parse_series_block_text(block: str) -> Optional[Dict[str, Any]]:
         return None
     code, title_line = _normalize_code(m.group(1)), m.group(2).strip()
     title_line = re.sub(r"\s+", " ", title_line)
-    actress_m = re.search(r"【演出女優】[︰：:]([^\n]+)", block)
+    actress_m = re.search(r"【(?:演出|出演)女[優优]】[︰：:]([^【\n]+)", block)
     actress = actress_m.group(1).strip() if actress_m else None
     if actress == "----":
         actress = None

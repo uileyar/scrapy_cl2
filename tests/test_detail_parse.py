@@ -6,7 +6,12 @@ import unittest
 from pathlib import Path
 from typing import Any, Dict, List
 
-from detail_parse import parse_detail_page, walk_conttpc
+from detail_parse import (
+    _actress_from_conttpc_plain,
+    _parse_series_block_text,
+    parse_detail_page,
+    walk_conttpc,
+)
 
 _ROOT = Path(__file__).resolve().parent.parent
 
@@ -59,6 +64,29 @@ def _assert_item_has_media_fields(
 
 
 class TestDetailParseOffline(unittest.TestCase):
+    def test_actress_label_出演_vs_演出(self) -> None:
+        """草榴部分帖用「出演女優」；旧逻辑只认「演出女優」会漏。"""
+        p1 = "foo\n【出演女優】：三田真鈴\n【影片大小】：6.23GB"
+        self.assertEqual(_actress_from_conttpc_plain(p1), "三田真鈴")
+        p2 = "【演出女優】︰浅野こころ\n"
+        self.assertEqual(_actress_from_conttpc_plain(p2), "浅野こころ")
+
+    def test_actress_label_simplified_女优(self) -> None:
+        """简体「女优」与繁体「女優」并存于草榴正文。"""
+        p = "【出演女优】：輝星きら【影片容量】：8.72G"
+        self.assertEqual(_actress_from_conttpc_plain(p), "輝星きら")
+
+    def test_series_block_actress_simplified_女优(self) -> None:
+        block = (
+            "MIDA-573 标题行\n"
+            "【出演女优】：輝星きら\n"
+            "【影片大小】：8.72GB"
+        )
+        pb = _parse_series_block_text(block)
+        self.assertIsNotNone(pb)
+        assert pb is not None
+        self.assertEqual(pb.get("actress"), "輝星きら")
+
     def test_signal_atid663(self) -> None:
         html = _read("detail-signal.html")
         r = parse_detail_page(html)
