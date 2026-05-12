@@ -33,7 +33,114 @@ VOID_TAGS = frozenset(
 CODE_RE = re.compile(r"(?<![A-Za-z0-9])\d*([A-Z]{2,}-?\d{2,})(?![A-Za-z0-9])")
 SIZE_HD_RE = re.compile(r"\[HD/\s*([\d.]+)\s*GB?\]", re.I)
 SIZE_MP4_RE = re.compile(r"\[MP4/\s*([\d.]+)\s*GB?\]", re.I)
+SIZE_MP4_FW_RE = re.compile(r"【\s*MP4/\s*([\d.]+)\s*GB?\s*】", re.I)
+SIZE_SD_RE = re.compile(r"\[SD/\s*([\d.]+)\s*GB?\]", re.I)
 SIZE_PLAIN_RE = re.compile(r"【影片大小】[︰：:]\s*([\d.]+)\s*GB?", re.I)
+SIZE_PLAIN_MB_RE = re.compile(r"【影片大小】[︰：:]\s*([\d,]+(?:\.\d+)?)\s*MB\b", re.I)
+SIZE_PLAIN_ALT_RE = re.compile(
+    r"(?:SD|HD)?-?MP4-(\d+\.?\d*)\s*GB\b",
+    re.I,
+)
+FILM_NAME_FIELD_RE = re.compile(r"【影片名[稱称]】[︰：:]([^\n]+)")
+CHINESE_TITLE_FIELD_RE = re.compile(r"【中文片名】[︰：:]([^\n]+)")
+_ACTRESS_TITLE_JUNK = frozenset(
+    {
+        "紀錄片",
+        "纪录片",
+        "中文字幕",
+        "高清",
+        "有碼",
+        "無碼",
+        "无码",
+        "字幕",
+        "合集",
+        "精選",
+        "精选",
+        "系列",
+        "限定",
+        "初回",
+        "版",
+    }
+)
+# 长叙事 h4/片名尾段易误判的短语（非人名）
+_ACTRESS_CN_PHRASE_JUNK = frozenset(
+    {
+        "青春性交",
+        "首次拍摄",
+        "我在有乐町搭讪",
+        "身材却完美无瑕",
+        "真的是软派",
+        "首部作品",
+        "她年纪轻轻",
+    }
+)
+# 片名里常见全大写英文词，非人名（避免「NO.1 STYLE」误认艺名）
+_ACTRESS_LATIN_JUNK = frozenset(
+    {
+        "STYLE",
+        "BODY",
+        "LOVE",
+        "LOVER",
+        "HEART",
+        "STAR",
+        "STARS",
+        "SWEET",
+        "CUTE",
+        "COOL",
+        "PINK",
+        "BLUE",
+        "MODE",
+        "BEAUTY",
+        "BEST",
+        "DREAM",
+        "NIGHT",
+        "ANGEL",
+        "DEVIL",
+        "HONEY",
+        "ROSE",
+        "APPLE",
+        "QUEEN",
+        "GIRL",
+        "LADY",
+        "PRINCESS",
+        "NEW",
+        "TRUE",
+        "PURE",
+        "DEEP",
+        "HIGH",
+        "MASTER",
+        "LIMITED",
+        "SPECIAL",
+        "DEBUT",
+    }
+)
+# 标题尾段猜女优：纯 CJK 候选最长（过长多为叙事句；结构化【出演女优】不受限）
+_ACTRESS_GUESS_CJK_MAX_LEN = 7
+# 句末语气/感叹碎片，勿当人名（如「太瘋狂了」）
+_ACTRESS_FRAG_ENDINGS = (
+    "了",
+    "嗎",
+    "吧",
+    "呢",
+    "啊",
+    "呀",
+    "喔",
+    "嘛",
+    "哎",
+    "嘿",
+    "哈",
+    "呐",
+    "咯",
+)
+# 片名/标题尾部候选：中日文姓名常见字符（含假名・）
+_ACTRESS_TOKEN_RE = re.compile(
+    r"^[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff・]{2,16}$",
+)
+_ACTRESS_TOKEN_ONE_RE = re.compile(
+    r"^[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff・]$",
+)
+# 片名中「【妻子・環奈】」类角色格内的人名（・后一节）
+_ROLE_DOT_NAME_RE = re.compile(r"【[^】]{0,32}・([^】]{1,12})】")
 H4_F16_RE = re.compile(
     r'<h4[^>]*\bclass\s*=\s*["\'][^"\']*\bf16\b[^"\']*["\'][^>]*>(.*?)</h4>',
     re.I | re.DOTALL,
@@ -177,7 +284,7 @@ def walk_conttpc(html: str) -> Tuple[str, List[str], List[str]]:
 
 
 def _h4_size_gb(h4_text: str) -> Optional[str]:
-    for rx in (SIZE_HD_RE, SIZE_MP4_RE):
+    for rx in (SIZE_HD_RE, SIZE_MP4_RE, SIZE_MP4_FW_RE, SIZE_SD_RE):
         m = rx.search(h4_text)
         if m:
             return m.group(1)
@@ -185,21 +292,179 @@ def _h4_size_gb(h4_text: str) -> Optional[str]:
 
 
 def _size_gb_from_plain(plain: str) -> Optional[str]:
-    """从正文中提取【影片大小】后的 GB 数值。"""
+    """从正文中提取【影片大小】后的 GB；其次 DMM 常见 SD-MP4-x.xxGB 行。"""
     m = SIZE_PLAIN_RE.search(plain)
-    return m.group(1) if m else None
-
-
-def _actress_from_conttpc_plain(plain: str) -> Optional[str]:
-    """单番号帖正文常见「出演者：」；字段标签多为 【演出女優】/【出演女優】，部分帖用简体 【出演女优】。"""
-    m = re.search(r"出演者[：:]\s*([^\n\r<]+)", plain)
     if m:
-        return m.group(1).strip()
-    m = re.search(r"【(?:演出|出演)女[優优]】[︰：:]([^【\n]+)", plain)
+        return m.group(1)
+    mb_m = SIZE_PLAIN_MB_RE.search(plain)
+    if mb_m:
+        mb = float(mb_m.group(1).replace(",", "").replace("，", ""))
+        gb = mb / 1024.0
+        s = f"{gb:.2f}".rstrip("0").rstrip(".")
+        return s if s else "0"
+    m2 = SIZE_PLAIN_ALT_RE.search(plain)
+    if m2:
+        return m2.group(1)
+    return None
+
+
+def _strip_leading_bracket_tags(text: str) -> str:
+    """去掉标题前连续 [有碼] [HD/xG] 等方括号标签。"""
+    t = text.strip()
+    return re.sub(r"(?:\[[^\]]*\]\s*)+", "", t).strip()
+
+
+def _actress_names_from_role_brackets(text: str) -> Optional[str]:
+    """从「【头衔・人名】」格式中收集・后人名（多女优以顿号连接）。"""
+    names: List[str] = []
+    seen: set[str] = set()
+    for m in _ROLE_DOT_NAME_RE.finditer(text):
+        n = m.group(1).strip(" 　「」『』")
+        if not n:
+            continue
+        ok = bool(_ACTRESS_TOKEN_RE.match(n)) or bool(_ACTRESS_TOKEN_ONE_RE.match(n))
+        if not ok or len(n) > 12:
+            continue
+        if n not in seen:
+            seen.add(n)
+            names.append(n)
+    if not names:
+        return None
+    return "、".join(names)
+
+
+def _strip_jav_debut_name_suffix(tok: str) -> str:
+    """「乃坂日和AV出道」类：去掉尾部 AV/AV出道，得到纯名。"""
+    m = re.match(
+        r"^([\u4e00-\u9fff\u3040-\u30ff・]{2,12})AV(?:出道|デビュー|DEBUT)?$",
+        tok,
+        re.I,
+    )
+    if m:
+        return m.group(1)
+    return tok
+
+
+def _actress_guess_from_title_tail(text: str) -> Optional[str]:
+    """从番号后的标题尾段猜女优名：先认【・】角色格；再自尾向首认全大写拉丁艺名；否则认中日文 token。"""
+    if not text or not text.strip():
+        return None
+    role = _actress_names_from_role_brackets(text)
+    if role:
+        return role
+    head = re.split(r"[\[【]", text, maxsplit=1)[0].strip()
+    if not head:
+        return None
+    parts = [p for p in re.split(r"[\s　，。、！!？?]+", head) if p]
+    for tok in reversed(parts):
+        t_raw = tok.strip(" 　「」『』【】（）()·")
+        t_raw = re.sub(r"《[^》]*》\s*$", "", t_raw).strip()
+        if len(t_raw) < 2:
+            continue
+        if (
+            2 <= len(t_raw) <= 15
+            and re.fullmatch(r"[A-Z]+", t_raw)
+            and t_raw not in _ACTRESS_LATIN_JUNK
+        ):
+            return t_raw
+        t = _strip_jav_debut_name_suffix(t_raw)
+        if t.endswith("的"):
+            continue
+        if "的" in t and len(t) > 5:
+            continue
+        if len(t) > _ACTRESS_GUESS_CJK_MAX_LEN:
+            continue
+        if len(t) <= 8 and t.endswith(_ACTRESS_FRAG_ENDINGS):
+            continue
+        if t in _ACTRESS_TITLE_JUNK:
+            continue
+        if t in _ACTRESS_CN_PHRASE_JUNK:
+            continue
+        if "搭讪" in t and len(t) >= 4:
+            continue
+        if "软派" in t:
+            continue
+        if not _ACTRESS_TOKEN_RE.match(t):
+            continue
+        if re.search(r"[a-zA-Z]{3,}", t):
+            continue
+        return t
+    return None
+
+
+def _actress_from_chinese_title_plain(plain: str) -> Optional[str]:
+    """【中文片名】行常为「长标题 + 空格 + 中文名」，优先于日文【影片名稱】启发式。"""
+    m = CHINESE_TITLE_FIELD_RE.search(plain)
     if not m:
         return None
-    a = m.group(1).strip()
-    return None if a == "----" else a
+    raw = m.group(1).strip()
+    return _actress_guess_from_title_tail(raw)
+
+
+def _actress_from_film_name_plain(plain: str) -> Optional[str]:
+    """【影片名稱/名称】行内、番号后的标题尾段启发式。"""
+    m = FILM_NAME_FIELD_RE.search(plain)
+    if not m:
+        return None
+    raw = m.group(1).strip()
+    raw = re.sub(r"^\[[^\]]+\]\s*", "", raw)
+    cm = CODE_RE.search(raw)
+    if cm:
+        tail = raw[cm.end() :].strip()
+    else:
+        tail = raw
+    tail = _strip_leading_bracket_tags(tail)
+    return _actress_guess_from_title_tail(tail)
+
+
+def _actress_from_h4_tail(h4_text: str) -> Optional[str]:
+    """h4 中番号之后、去掉前导方括号块后的标题尾段启发式。"""
+    cm = CODE_RE.search(h4_text)
+    if not cm:
+        return None
+    tail = h4_text[cm.end() :].strip()
+    tail = _strip_leading_bracket_tags(tail)
+    return _actress_guess_from_title_tail(tail)
+
+
+def _actress_from_conttpc_plain(plain: str, h4_text: Optional[str] = None) -> Optional[str]:
+    """先认结构化女优字段；再【中文片名】；【影片名稱】/ h4 标题启发式。"""
+    m = re.search(
+        r"出演者[：:]\s*(.+?)(?=監督|监督|制作|品番|配信|系列|収録|发行|商品|[\r\n]|\Z)",
+        plain,
+    )
+    if m:
+        a = m.group(1).strip()
+        if a and a != "----":
+            return a
+    m = re.search(
+        r"(?<!者)出演[：:]\s*([^\n\r<制作品番配信系列収録发行：:]+?)(?=制作|品番|配信|系列|収録|发行|[\s\r\n]|$)",
+        plain,
+    )
+    if m:
+        a = m.group(1).strip()
+        if a and a != "----":
+            return a
+    m = re.search(r"【(?:演出|出演)女[優优]】[︰：:]([^【\n]+)", plain)
+    if m:
+        a = m.group(1).strip()
+        if a != "----":
+            return a
+    # 正文标明出演者：----（总集等）时勿再用片名/h4 猜女优；【中文片名】仍可独占真名
+    skip_film_h4_actress_guess = bool(re.search(r"出演者[：:]\s*----", plain))
+    cz = _actress_from_chinese_title_plain(plain)
+    if cz:
+        return cz
+    if skip_film_h4_actress_guess:
+        return None
+    g = _actress_from_film_name_plain(plain)
+    if g:
+        return g
+    if h4_text:
+        h = _actress_from_h4_tail(h4_text)
+        if h:
+            return h
+    return None
 
 
 def parse_detail_signal(
@@ -213,7 +478,7 @@ def parse_detail_signal(
     item: Dict[str, Any] = {
         "code": None,
         "title": None,
-        "actress": _actress_from_conttpc_plain(plain),
+        "actress": _actress_from_conttpc_plain(plain, h4_text),
         "size_gb": None,
         "poster_url": img_urls[0] if img_urls else None,
         "torrent_url": rmdown_hrefs[0] if rmdown_hrefs else None,
@@ -454,6 +719,8 @@ def parse_detail_items(html: str) -> List[Dict[str, Any]]:
         title = _clean_title(raw.get("title") or "")
         if actress:
             title = title.replace(actress, "").strip()
+        title = re.sub(r"\(\s*\)|（\s*）", "", title)
+        title = re.sub(r"\s+", " ", title).strip()
 
         parts: List[str] = []
         if actress:
