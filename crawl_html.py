@@ -24,6 +24,7 @@ from detail_parse import fetch_and_parse_detail
 from image_download import download_image_from_url
 from list_parse import build_list_page_url, fetch_and_parse_list_page
 from rmdown_download import download_from_rmdown_url
+from title_translate import translate_code_title
 
 log = logging.getLogger(__name__)
 
@@ -176,12 +177,18 @@ def crawl_pipeline(
                         log.error("  TORRENT-ERR %s: %s", item["torrent_url"], e)
                         continue
 
-                # 1.8：番号条目入库
+                # 1.8：番号条目入库（title_transfer：与 code_title 不同的译文才写入）
+                ct = (item.get("code_title") or "").strip()
+                title_tr = (translate_code_title(item.get("code_title")) or "").strip()
+                title_transfer = (
+                    title_tr if title_tr and title_tr != ct else None
+                )
                 upsert_item(
                     conn,
                     thread_url=detail_url,
                     code=item.get("code") or "unknown",
                     code_title=item.get("code_title"),
+                    title_transfer=title_transfer,
                     actress=item.get("actress"),
                     size_gb=item.get("size_gb"),
                     img_url=item.get("img_url"),

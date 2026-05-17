@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 SQLite 数据层：threads 表（列表页条目）+ items 表（详情页番号条目）。
-对外 API：ensure_db、thread_exists、upsert_thread、update_thread_status、upsert_item
+对外 API：ensure_db、thread_exists、upsert_thread、update_thread_status、upsert_item（含 title_transfer）
 """
 from __future__ import annotations
 
@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS items (
     thread_url TEXT NOT NULL,
     code TEXT NOT NULL,
     code_title TEXT,
+    title_transfer TEXT,
     actress TEXT,
     size_gb TEXT,
     img_url TEXT,
@@ -57,6 +58,10 @@ def ensure_db(db_path: Path) -> sqlite3.Connection:
             conn.execute(f"ALTER TABLE {tbl} ADD COLUMN source TEXT DEFAULT ''")
         except sqlite3.OperationalError:
             pass
+    try:
+        conn.execute("ALTER TABLE items ADD COLUMN title_transfer TEXT")
+    except sqlite3.OperationalError:
+        pass
     conn.commit()
     return conn
 
@@ -104,6 +109,7 @@ def upsert_item(
     thread_url: str,
     code: str,
     code_title: Optional[str] = None,
+    title_transfer: Optional[str] = None,
     actress: Optional[str] = None,
     size_gb: Optional[str] = None,
     img_url: Optional[str] = None,
@@ -114,12 +120,13 @@ def upsert_item(
 ) -> None:
     conn.execute(
         """
-        INSERT INTO items (thread_url, code, code_title, actress, size_gb,
+        INSERT INTO items (thread_url, code, code_title, title_transfer, actress, size_gb,
                            img_url, img_path, torrent_url, torrent_path,
                            source, crawled_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(thread_url, code) DO UPDATE SET
             code_title = COALESCE(excluded.code_title, items.code_title),
+            title_transfer = COALESCE(excluded.title_transfer, items.title_transfer),
             actress = COALESCE(excluded.actress, items.actress),
             size_gb = COALESCE(excluded.size_gb, items.size_gb),
             img_url = COALESCE(excluded.img_url, items.img_url),
@@ -129,7 +136,7 @@ def upsert_item(
             source = excluded.source,
             crawled_at = excluded.crawled_at;
         """,
-        (thread_url, code, code_title, actress, size_gb,
+        (thread_url, code, code_title, title_transfer, actress, size_gb,
          img_url, img_path, torrent_url, torrent_path, source, _now_iso()),
     )
     conn.commit()
