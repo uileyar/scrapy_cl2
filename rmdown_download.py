@@ -12,9 +12,13 @@ import time
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import urlencode, urlparse
-from urllib.request import Request, urlopen
+from urllib.request import Request, ProxyHandler, build_opener, urlopen
 
 log = logging.getLogger(__name__)
+
+# Clash Verge 默认代理
+_DEFAULT_PROXY = "http://127.0.0.1:7897"
+_opener = build_opener(ProxyHandler({"http": _DEFAULT_PROXY, "https": _DEFAULT_PROXY}))
 
 
 DOWNLOAD_BASE = "https://www.rmdown.com/download.php"
@@ -71,7 +75,7 @@ def _fetch_text(url: str, *, referer: str | None = None, session_headers: dict[s
     if session_headers:
         headers.update(session_headers)
     req = Request(url, headers=headers, method="GET")
-    with urlopen(req, timeout=60) as resp:
+    with _opener.open(req, timeout=60) as resp:
         raw = resp.read()
     return raw.decode("utf-8", errors="replace")
 
@@ -102,7 +106,7 @@ def download_torrent(
         headers.update(session_headers)
 
     req = Request(url, headers=headers, method="GET")
-    with urlopen(req, timeout=60) as resp:
+    with _opener.open(req, timeout=60) as resp:
         data = resp.read()
         cd = resp.headers.get("Content-Disposition")
         name = _filename_from_disposition(cd)

@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
-from urllib.request import Request, urlopen
+from urllib.request import Request, ProxyHandler, build_opener, urlopen
 
 log = logging.getLogger(__name__)
 
@@ -12,6 +13,25 @@ DEFAULT_UA = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/124.0.0.0 Safari/537.36"
 )
+
+# Clash Verge 默认代理端口
+DEFAULT_PROXY = "http://127.0.0.1:7897"
+
+
+def _get_opener():
+    """构建带代理的 opener，优先使用环境变量，否则使用默认代理。"""
+    proxy = (
+        os.environ.get("HTTPS_PROXY")
+        or os.environ.get("https_proxy")
+        or os.environ.get("HTTP_PROXY")
+        or os.environ.get("http_proxy")
+        or DEFAULT_PROXY
+    )
+    handler = ProxyHandler({"http": proxy, "https": proxy})
+    return build_opener(handler)
+
+
+_opener = _get_opener()
 
 
 def fetch_html(
@@ -27,7 +47,7 @@ def fetch_html(
     for attempt in range(retries):
         try:
             req = Request(url, headers={"User-Agent": ua})
-            with urlopen(req, timeout=timeout) as resp:
+            with _opener.open(req, timeout=timeout) as resp:
                 charset = resp.headers.get_content_charset() or "utf-8"
                 return resp.read().decode(charset, errors="replace")
         except Exception as e:

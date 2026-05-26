@@ -7,9 +7,11 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from detail_parse import (
+    _ACTRESS_TOPIC_NAME_RE,
     _actress_from_conttpc_plain,
     _h4_size_gb,
     _parse_series_block_text,
+    parse_detail_items,
     parse_detail_page,
     walk_conttpc,
 )
@@ -108,6 +110,80 @@ class TestDetailParseOffline(unittest.TestCase):
         """正文无出演/片名行时，用 h4 番号后标题尾段。"""
         h4 = "[有碼] [HD/5.1G]ATID-663 超長標題 栗山莉緒"
         self.assertEqual(_actress_from_conttpc_plain("只有大小\n【影片大小】：5.1GB", h4), "栗山莉緒")
+
+    def test_actress_from_topic_title_single_work_name(self) -> None:
+        """Thread title '瀧本雫葉作品' should provide a single-name fallback."""
+        topic = "[MP4/168.34GB] 女优高清无水印28影片瀧本雫葉作品"
+        plain = (
+            "【影片名稱】：ABF-235 瀧本雫葉と朝まで過ごせる超高級デートクラブ"
+            "[限定特典映像50分付き]\n"
+            "[影片製作]︰Prestige [影片時間]︰185min"
+        )
+        self.assertEqual(_actress_from_conttpc_plain(plain, topic), "瀧本雫葉")
+
+    def test_parse_detail_items_uses_topic_title_for_signal_actress(self) -> None:
+        topic = "[MP4/168.34GB] 女优高清无水印28影片瀧本雫葉作品"
+        html = """
+        <html>
+          <body>
+            <h4 class="f16">[MP4/1.00G] ABF-235 朝まで過ごせる超高級デートクラブ</h4>
+            <div id="conttpc">
+              【影片大小】：1.00GB<br>
+              <img src="https://example.test/poster.jpg">
+              <a href="https://rmdown.com/link.php?hash=abc">torrent</a>
+            </div>
+          </body>
+        </html>
+        """
+        items = parse_detail_items(html, topic_title=topic)
+        self.assertEqual(items[0].get("actress"), "瀧本雫葉")
+        self.assertTrue(items[0].get("code_title", "").startswith("瀧本雫葉 ABF-235"))
+
+    def test_actress_from_topic_title_beats_multi_name_film_title(self) -> None:
+        """When film title contains many names, 'さつき芽衣作品' is the best single evidence."""
+        topic = "[MP4/119.70GB] 女优高清无水印18影片さつき芽衣作品"
+        plain = (
+            "【影片名稱】：BTHA-111 ヘアーヌード～無修正・7人の絶頂・永久保存版～"
+            "パンティー付美園和花新村あかりさつき芽衣吉根ゆりあ森沢かな大浦真奈美波多野結衣"
+        )
+        self.assertEqual(_actress_from_conttpc_plain(plain, topic), "さつき芽衣")
+
+    def test_actress_from_topic_title_rejects_first_work_junk(self) -> None:
+        topic = "[MP4/1G] ABC-123 首部作品"
+        self.assertIsNone(_actress_from_conttpc_plain("", topic))
+
+    def test_actress_from_topic_title_rejects_generic_actress_collection(self) -> None:
+        topic = "[MP4/1G] ABC-123 女优合集"
+        self.assertIsNone(_actress_from_conttpc_plain("", topic))
+
+    def test_actress_title_fallback_allows_tail_single_hanzi_only(self) -> None:
+        """Do not return the leading Chinese phrase; allow the tail single Hanzi name."""
+        h4 = "[MP4/ 1.53G] JUR-589 為了讓她承認愛，和妻子和絕倫後輩兩人獨處3小時 惠"
+        self.assertEqual(_actress_from_conttpc_plain("", h4), "惠")
+
+    def test_actress_title_tail_rejects_long_chinese_phrase(self) -> None:
+        h4 = "[MP4/ 1.53G] JUR-589 為了讓她承認愛，和妻子和絕倫後輩兩人獨處3小時"
+        self.assertIsNone(_actress_from_conttpc_plain("", h4))
+
+    def test_actress_title_tail_rejects_non_hanzi_single_character(self) -> None:
+        h4 = "[MP4/ 1.53G] JUR-589 テスト A"
+        self.assertIsNone(_actress_from_conttpc_plain("", h4))
+
+    def test_actress_title_tail_allows_seven_hanzi_candidate(self) -> None:
+        h4 = "[MP4/ 1.53G] JUR-589 超長標題 一二三四五六七"
+        self.assertEqual(_actress_from_conttpc_plain("", h4), "一二三四五六七")
+
+    def test_actress_topic_name_regex_excludes_descriptor_prefix(self) -> None:
+        cases = [
+            ("[MP4/168.34GB] 女优高清无水印28影片瀧本雫葉作品", "瀧本雫葉"),
+            ("[MP4/119.70GB] 女优高清无水印18影片さつき芽衣作品", "さつき芽衣"),
+        ]
+        for topic, actress in cases:
+            with self.subTest(topic=topic):
+                m = _ACTRESS_TOPIC_NAME_RE.search(topic)
+                self.assertIsNotNone(m)
+                assert m is not None
+                self.assertEqual(m.group(1), actress)
 
     def test_actress_guess_role_dot_brackets_multi(self) -> None:
         """【角色・名】多段时合并（7253784 类）。"""

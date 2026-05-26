@@ -14,6 +14,7 @@ import re
 import sqlite3
 import subprocess
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from flask import (
@@ -41,6 +42,26 @@ DB_PATH: Path = Path("cl.db")
 DEFAULT_ITEMS_SOURCE = (
     "zz"  # 番号库「来源」无查询参数时的默认值（/?source= 为空表示全部来源）
 )
+_UTC8 = timezone(timedelta(hours=8))
+
+
+def format_crawled_at_utc8(value: str | None) -> str:
+    """将库内 UTC ISO8601 crawled_at 格式化为 UTC+8 的 YYYY-MM-DDTHH:MM。"""
+    if not value:
+        return "—"
+    try:
+        s = value.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(_UTC8).strftime("%Y-%m-%dT%H:%M")
+    except (ValueError, TypeError):
+        return value[:16] if len(value) >= 16 else value
+
+
+@app.template_filter("crawled_at_utc8")
+def crawled_at_utc8_filter(value: str | None) -> str:
+    return format_crawled_at_utc8(value)
 
 
 # ── 数据库连接 ──────────────────────────────────────────────
@@ -811,7 +832,7 @@ TEMPLATE_ITEMS = _BASE.replace(
             <span class="item-code">{{ r['code'] }}</span>
             <span class="item-actress" title="{{ r['actress'] or '' }}">{{ r['actress'] or '—' }}</span>
             <span class="item-size">{{ r['size_gb'] or '—' }}GB</span>
-            <span class="item-time">{{ r['crawled_at'][:16] if r['crawled_at'] else '—' }}</span>
+            <span class="item-time">{{ r['crawled_at']|crawled_at_utc8 }}</span>
           </div>
           <div class="item-row1-tags">
             {% if lh and lh['picpic'] %}<span class="badge-local badge-local-pic">图片</span>{% endif %}
@@ -922,7 +943,7 @@ TEMPLATE_THREADS = _BASE.replace(
       </td>
       <td>{{ r['downloads'] or 0 }}</td>
       <td><a href="{{ r['url'] }}" target="_blank">🔗</a></td>
-      <td style="color:#64748b;font-size:.8rem;white-space:nowrap">{{ r['crawled_at'][:16] if r['crawled_at'] else '—' }}</td>
+      <td style="color:#64748b;font-size:.8rem;white-space:nowrap">{{ r['crawled_at']|crawled_at_utc8 }}</td>
     </tr>
     {% else %}
     <tr><td colspan="6" style="text-align:center;color:#64748b;padding:40px">暂无数据</td></tr>

@@ -12,7 +12,11 @@ import sys
 from pathlib import Path
 from urllib.error import URLError
 from urllib.parse import urlparse, urlunparse
-from urllib.request import Request, urlopen
+from urllib.request import Request, ProxyHandler, build_opener, urlopen
+
+# Clash Verge 默认代理
+_DEFAULT_PROXY = "http://127.0.0.1:7897"
+_opener = build_opener(ProxyHandler({"http": _DEFAULT_PROXY, "https": _DEFAULT_PROXY}))
 
 log = logging.getLogger(__name__)
 
@@ -132,7 +136,7 @@ def _replace_host(url: str) -> str:
 def _do_fetch(url: str, headers: dict[str, str]) -> tuple[bytes, str | None, str, str | None]:
     """发起 GET 请求，返回 (data, content_disposition, final_url, content_type)。"""
     req = Request(url, headers=headers, method="GET")
-    with urlopen(req, timeout=60) as resp:
+    with _opener.open(req, timeout=60) as resp:
         return (
             resp.read(),
             resp.headers.get("Content-Disposition"),
