@@ -124,7 +124,10 @@ def crawl_pipeline(
             log.info("[%d/%d] %s", i, len(all_threads), detail_url)
 
             try:
-                items = fetch_and_parse_detail(detail_url)
+                items = fetch_and_parse_detail(
+                    detail_url,
+                    topic_title=thread.get("title"),
+                )
             except Exception as e:
                 log.error("详情页请求失败 %s: %s", detail_url, e)
                 continue
