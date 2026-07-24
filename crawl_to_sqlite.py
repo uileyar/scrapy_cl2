@@ -10,6 +10,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from local_assets import is_valid_image_file, is_valid_torrent_file
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -140,3 +142,84 @@ def upsert_item(
          img_url, img_path, torrent_url, torrent_path, source, _now_iso()),
     )
     conn.commit()
+
+
+def list_pending_threads(conn: sqlite3.Connection) -> list[dict]:
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        "SELECT url, title, downloads, source, status FROM threads WHERE status = 'pending'"
+    ).fetchall()
+    result = [dict(r) for r in rows]
+    conn.row_factory = None
+    return result
+
+
+def list_items_for_thread(conn: sqlite3.Connection, thread_url: str) -> list[dict]:
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        """
+        SELECT id, thread_url, code, code_title, title_transfer, actress, size_gb,
+               img_url, img_path, torrent_url, torrent_path, source
+        FROM items WHERE thread_url = ?
+        """,
+        (thread_url,),
+    ).fetchall()
+    result = [dict(r) for r in rows]
+    conn.row_factory = None
+    return result
+
+
+def list_candidate_missing_asset_rows(conn: sqlite3.Connection) -> list[dict]:
+    """SQL candidates: has URL and (path NULL/empty). File-missing-with-path checked in Python."""
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        """
+        SELECT thread_url, code, img_url, img_path, torrent_url, torrent_path
+        FROM items
+        WHERE
+          (img_url IS NOT NULL AND img_url != '' AND (img_path IS NULL OR img_path = ''))
+          OR
+          (torrent_url IS NOT NULL AND torrent_url != ''
+           AND (torrent_path IS NULL OR torrent_path = ''))
+        """
+    ).fetchall()
+    result = [dict(r) for r in rows]
+    conn.row_factory = None
+    return result
+
+
+def item_needs_asset_retry(item: dict) -> bool:
+    img_url = (item.get("img_url") or "").strip()
+    tor_url = (item.get("torrent_url") or "").strip()
+    if img_url and not is_valid_image_file(item.get("img_path") or ""):
+        return True
+    if tor_url and not is_valid_torrent_file(item.get("torrent_path") or ""):
+        return True
+    return False
+
+
+def thread_assets_complete(conn: sqlite3.Connection, thread_url: str) -> bool:
+    items = list_items_for_thread(conn, thread_url)
+    if not items:
+        return False
+    return not any(item_needs_asset_retry(it) for it in items)
+
+
+def list_thread_urls_with_missing_assets(conn: sqlite3.Connection) -> list[str]:
+    urls: set[str] = set()
+    for row in list_candidate_missing_asset_rows(conn):
+        urls.add(row["thread_url"])
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        """
+        SELECT thread_url, img_url, img_path, torrent_url, torrent_path FROM items
+        WHERE (img_url IS NOT NULL AND img_url != '' AND img_path IS NOT NULL AND img_path != '')
+           OR (torrent_url IS NOT NULL AND torrent_url != ''
+               AND torrent_path IS NOT NULL AND torrent_path != '')
+        """
+    ).fetchall()
+    for r in rows:
+        if item_needs_asset_retry(dict(r)):
+            urls.add(r["thread_url"])
+    conn.row_factory = None
+    return sorted(urls)
