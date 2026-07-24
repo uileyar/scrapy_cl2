@@ -127,6 +127,93 @@ class TestCrawlPipelineResume(unittest.TestCase):
         ).fetchone()
         self.assertEqual(row[0], "pending")
 
+    def test_full_thread_all_size_filtered_marks_done_without_downloads(self) -> None:
+        upsert_thread(self.conn, "http://t", "T", status="pending")
+        parsed_items = [
+            {
+                "code": "C1",
+                "code_title": "C1 Title",
+                "actress": None,
+                "size_gb": "1.5",
+                "img_url": "http://img/1.jpg",
+                "torrent_url": "http://rm/1",
+            },
+            {
+                "code": "C2",
+                "code_title": "C2 Title",
+                "actress": None,
+                "size_gb": "1.0",
+                "img_url": "http://img/2.jpg",
+                "torrent_url": "http://rm/2",
+            },
+        ]
+
+        with mock.patch("crawl_html.fetch_and_parse_detail", return_value=parsed_items), \
+             mock.patch("crawl_html.download_image_from_url") as image_download, \
+             mock.patch("crawl_html.download_from_rmdown_url") as torrent_download:
+            from crawl_html import _process_thread_full
+
+            _process_thread_full(
+                conn=self.conn,
+                thread={"url": "http://t", "title": "T", "downloads": 0},
+                day_dir=self.dl,
+                source="zz",
+                delay_sec=0,
+            )
+
+        self.assertEqual(list_items_for_thread(self.conn, "http://t"), [])
+        image_download.assert_not_called()
+        torrent_download.assert_not_called()
+        row = self.conn.execute(
+            "SELECT status FROM threads WHERE url=?", ("http://t",)
+        ).fetchone()
+        self.assertEqual(row[0], "done")
+
+    def test_full_thread_mixed_size_filter_and_kept_item_marks_done(self) -> None:
+        upsert_thread(self.conn, "http://t", "T", status="pending")
+        parsed_items = [
+            {
+                "code": "C1",
+                "code_title": "C1 Title",
+                "actress": None,
+                "size_gb": "1.5",
+                "img_url": "http://img/1.jpg",
+                "torrent_url": "http://rm/1",
+            },
+            {
+                "code": "C2",
+                "code_title": "C2 Title",
+                "actress": None,
+                "size_gb": "3.0",
+                "img_url": None,
+                "torrent_url": None,
+            },
+        ]
+
+        with mock.patch("crawl_html.fetch_and_parse_detail", return_value=parsed_items), \
+             mock.patch("crawl_html.download_image_from_url") as image_download, \
+             mock.patch("crawl_html.download_from_rmdown_url") as torrent_download, \
+             mock.patch("crawl_html.translate_code_title", return_value=None):
+            from crawl_html import _process_thread_full
+
+            _process_thread_full(
+                conn=self.conn,
+                thread={"url": "http://t", "title": "T", "downloads": 0},
+                day_dir=self.dl,
+                source="zz",
+                delay_sec=0,
+            )
+
+        items = list_items_for_thread(self.conn, "http://t")
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["code"], "C2")
+        image_download.assert_not_called()
+        torrent_download.assert_not_called()
+        row = self.conn.execute(
+            "SELECT status FROM threads WHERE url=?", ("http://t",)
+        ).fetchone()
+        self.assertEqual(row[0], "done")
+
     def test_patch_deletes_corrupt_db_image_in_old_dir(self) -> None:
         old_dir = self.root / "old_assets"
         old_dir.mkdir()

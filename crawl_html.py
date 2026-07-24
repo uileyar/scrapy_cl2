@@ -194,11 +194,15 @@ def _process_thread_full(
     save_dir = day_dir / _sanitize_dirname(thread["title"]) if len(items) > 1 else day_dir
     save_dir.mkdir(parents=True, exist_ok=True)
     existing_items = {item["code"]: item for item in list_items_for_thread(conn, detail_url)}
+    kept = 0
+    filtered = 0
 
     for item in items:
         size_gb = item.get("size_gb")
         if size_gb and float(size_gb) <= 1.5:
+            filtered += 1
             continue
+        kept += 1
         code = item.get("code") or "unknown"
         prior = existing_items.get(code, {})
         code_title = item.get("code_title") or code
@@ -228,9 +232,18 @@ def _process_thread_full(
         if delay_sec > 0:
             time.sleep(delay_sec)
 
-    update_thread_status(
-        conn, detail_url, "done" if thread_assets_complete(conn, detail_url) else "pending"
+    remaining_items = list_items_for_thread(conn, detail_url)
+    all_filtered_without_retries = (
+        kept == 0
+        and filtered > 0
+        and not any(item_needs_asset_retry(item) for item in remaining_items)
     )
+    status = (
+        "done"
+        if thread_assets_complete(conn, detail_url) or all_filtered_without_retries
+        else "pending"
+    )
+    update_thread_status(conn, detail_url, status)
 
 
 def _process_thread_patch(
