@@ -15,6 +15,11 @@ from pathlib import Path
 
 from crawl_to_sqlite import (
     ensure_db,
+    item_needs_asset_retry,
+    list_items_for_thread,
+    list_pending_threads,
+    list_thread_urls_with_missing_assets,
+    thread_assets_complete,
     thread_exists,
     update_thread_status,
     upsert_item,
@@ -25,6 +30,11 @@ from image_download import download_image_from_url
 from list_parse import build_list_page_url, fetch_and_parse_list_page
 from rmdown_download import download_from_rmdown_url
 from title_translate import translate_code_title
+from local_assets import (
+    is_valid_image_file,
+    is_valid_torrent_file,
+    resolve_asset_path,
+)
 
 log = logging.getLogger(__name__)
 
@@ -68,6 +78,209 @@ def _sanitize_filename(name: str) -> str:
     return name[:120] or "file"
 
 
+def _build_work_queue(*, conn, list_threads: list[dict], source: str) -> list[dict]:
+    """合并列表页、待处理和缺失资源线程；全量处理优先于补丁处理。"""
+    del source
+    by_url: dict[str, dict] = {}
+    for row in list_threads:
+        by_url[row["url"]] = {
+            "url": row["url"],
+            "title": row.get("title") or "",
+            "downloads": row.get("downloads") or 0,
+            "mode": "full",
+        }
+    for row in list_pending_threads(conn):
+        if row["url"] not in by_url:
+            by_url[row["url"]] = {
+                "url": row["url"],
+                "title": row.get("title") or "",
+                "downloads": row.get("downloads") or 0,
+                "mode": "full",
+            }
+    for url in list_thread_urls_with_missing_assets(conn):
+        if url in by_url:
+            continue
+        row = conn.execute(
+            "SELECT url, title, downloads FROM threads WHERE url = ?", (url,)
+        ).fetchone()
+        if row:
+            by_url[url] = {
+                "url": row[0],
+                "title": row[1] or "",
+                "downloads": row[2] or 0,
+                "mode": "patch",
+            }
+    return list(by_url.values())
+
+
+def _ensure_image(
+    img_url: str | None,
+    img_path_db: str | None,
+    save_dir: Path,
+    safe_name: str,
+) -> str | None:
+    if not img_url:
+        return img_path_db if is_valid_image_file(img_path_db or "") else None
+    existing = resolve_asset_path(
+        db_path=img_path_db, save_dir=save_dir, stem=safe_name, kind="image"
+    )
+    if existing:
+        return str(existing)
+    for path in save_dir.glob(f"{safe_name}.*"):
+        if (
+            path.is_file()
+            and path.suffix.lower() != ".torrent"
+            and not is_valid_image_file(path)
+        ):
+            path.unlink(missing_ok=True)
+    try:
+        return str(download_image_from_url(img_url, save_dir, filename=safe_name))
+    except Exception as exc:
+        log.error("  IMG-ERR %s: %s", img_url, exc)
+        return None
+
+
+def _ensure_torrent(
+    torrent_url: str | None,
+    torrent_path_db: str | None,
+    save_dir: Path,
+    safe_name: str,
+) -> str | None:
+    if not torrent_url:
+        return torrent_path_db if is_valid_torrent_file(torrent_path_db or "") else None
+    existing = resolve_asset_path(
+        db_path=torrent_path_db, save_dir=save_dir, stem=safe_name, kind="torrent"
+    )
+    if existing:
+        return str(existing)
+    target = save_dir / f"{safe_name}.torrent"
+    if target.is_file() and not is_valid_torrent_file(target):
+        target.unlink(missing_ok=True)
+    try:
+        return str(download_from_rmdown_url(torrent_url, save_dir, filename=safe_name))
+    except Exception as exc:
+        log.error("  TORRENT-ERR %s: %s", torrent_url, exc)
+        return None
+
+
+def _process_thread_full(
+    *,
+    conn,
+    thread: dict,
+    day_dir: Path,
+    source: str,
+    delay_sec: float,
+) -> None:
+    detail_url = thread["url"]
+    try:
+        items = fetch_and_parse_detail(detail_url, topic_title=thread.get("title"))
+    except Exception as exc:
+        log.error("详情页请求失败 %s: %s", detail_url, exc)
+        update_thread_status(conn, detail_url, "pending")
+        return
+    if not items:
+        log.warning("未解析到番号条目 %s", detail_url)
+        update_thread_status(conn, detail_url, "pending")
+        return
+
+    save_dir = day_dir / _sanitize_dirname(thread["title"]) if len(items) > 1 else day_dir
+    save_dir.mkdir(parents=True, exist_ok=True)
+    existing_items = {item["code"]: item for item in list_items_for_thread(conn, detail_url)}
+
+    for item in items:
+        size_gb = item.get("size_gb")
+        if size_gb and float(size_gb) <= 1.5:
+            continue
+        code = item.get("code") or "unknown"
+        prior = existing_items.get(code, {})
+        code_title = item.get("code_title") or code
+        safe_name = _sanitize_filename(code_title)
+        img_path = _ensure_image(
+            item.get("img_url"), prior.get("img_path"), save_dir, safe_name
+        )
+        torrent_path = _ensure_torrent(
+            item.get("torrent_url"), prior.get("torrent_path"), save_dir, safe_name
+        )
+        translated = (translate_code_title(item.get("code_title")) or "").strip()
+        title_transfer = translated if translated and translated != (item.get("code_title") or "").strip() else None
+        upsert_item(
+            conn,
+            thread_url=detail_url,
+            code=code,
+            code_title=item.get("code_title"),
+            title_transfer=title_transfer,
+            actress=item.get("actress"),
+            size_gb=size_gb,
+            img_url=item.get("img_url"),
+            img_path=img_path,
+            torrent_url=item.get("torrent_url"),
+            torrent_path=torrent_path,
+            source=source,
+        )
+        if delay_sec > 0:
+            time.sleep(delay_sec)
+
+    update_thread_status(
+        conn, detail_url, "done" if thread_assets_complete(conn, detail_url) else "pending"
+    )
+
+
+def _process_thread_patch(
+    *,
+    conn,
+    thread_url: str,
+    title: str,
+    save_dir: Path,
+    source: str,
+    delay_sec: float,
+) -> None:
+    del title
+    save_dir.mkdir(parents=True, exist_ok=True)
+    for item in list_items_for_thread(conn, thread_url):
+        if not item_needs_asset_retry(item):
+            continue
+        safe_name = _sanitize_filename(item.get("code_title") or item["code"] or "unknown")
+        img_path = item.get("img_path")
+        torrent_path = item.get("torrent_path")
+        if item.get("img_url") and not is_valid_image_file(img_path or ""):
+            img_path = _ensure_image(item["img_url"], img_path, save_dir, safe_name)
+        if item.get("torrent_url") and not is_valid_torrent_file(torrent_path or ""):
+            torrent_path = _ensure_torrent(
+                item["torrent_url"], torrent_path, save_dir, safe_name
+            )
+        upsert_item(
+            conn,
+            thread_url=thread_url,
+            code=item["code"],
+            code_title=item.get("code_title"),
+            title_transfer=item.get("title_transfer"),
+            actress=item.get("actress"),
+            size_gb=item.get("size_gb"),
+            img_url=item.get("img_url"),
+            img_path=img_path,
+            torrent_url=item.get("torrent_url"),
+            torrent_path=torrent_path,
+            source=source,
+        )
+        if delay_sec > 0:
+            time.sleep(delay_sec)
+    update_thread_status(
+        conn, thread_url, "done" if thread_assets_complete(conn, thread_url) else "pending"
+    )
+
+
+def _patch_save_dir(conn, thread_url: str, title: str, day_dir: Path) -> Path:
+    items = list_items_for_thread(conn, thread_url)
+    for item in items:
+        for path, check in (
+            (item.get("img_path"), is_valid_image_file),
+            (item.get("torrent_path"), is_valid_torrent_file),
+        ):
+            if path and check(path):
+                return Path(path).parent
+    return day_dir / _sanitize_dirname(title) if len(items) > 1 else day_dir
+
+
 def crawl_pipeline(
     source: str,
     download_dir: Path,
@@ -107,8 +320,10 @@ def crawl_pipeline(
             if list_delay_sec > 0:
                 time.sleep(list_delay_sec)
 
-        # 1.9（前半）：新 thread 先入库，状态 pending
-        for thread in all_threads:
+        work = _build_work_queue(conn=conn, list_threads=all_threads, source=source)
+        for thread in work:
+            if thread["mode"] != "full":
+                continue
             upsert_thread(
                 conn,
                 thread["url"],
@@ -118,95 +333,22 @@ def crawl_pipeline(
                 status="pending",
             )
 
-        # ── 1.5 ~ 1.8：逐条处理详情页 ──
-        for i, thread in enumerate(all_threads, 1):
-            detail_url = thread["url"]
-            log.info("[%d/%d] %s", i, len(all_threads), detail_url)
-
-            try:
-                items = fetch_and_parse_detail(
-                    detail_url,
-                    topic_title=thread.get("title"),
+        for i, thread in enumerate(work, 1):
+            log.info("[%d/%d] %s", i, len(work), thread["url"])
+            if thread["mode"] == "full":
+                _process_thread_full(
+                    conn=conn, thread=thread, day_dir=day_dir,
+                    source=source, delay_sec=delay_sec,
                 )
-            except Exception as e:
-                log.error("详情页请求失败 %s: %s", detail_url, e)
-                continue
-
-            if not items:
-                log.warning("未解析到番号条目 %s", detail_url)
-                continue
-
-            # 1.6：多番号时以列表标题创建子目录
-            if len(items) > 1:
-                safe_title = _sanitize_dirname(thread["title"])
-                save_dir = day_dir / safe_title
             else:
-                save_dir = day_dir
-            save_dir.mkdir(parents=True, exist_ok=True)
-
-            for item in items:
-                size_gb = item.get("size_gb")
-                if size_gb and float(size_gb) <= 1.5:
-                    continue
-                code_title = item.get("code_title") or item.get("code") or "unknown"
-                safe_name = _sanitize_filename(code_title)
-
-                # 1.6b：下载图片，code_title 作为文件名
-                img_path: str | None = None
-                if item.get("img_url"):
-                    try:
-                        p = download_image_from_url(
-                            item["img_url"],
-                            save_dir,
-                            filename=safe_name,
-                        )
-                        img_path = str(p)
-                        log.info("  IMG %s", p.name)
-                    except Exception as e:
-                        log.error("  IMG-ERR %s: %s", item["img_url"], e)
-
-                # 1.7：下载种子，code_title 作为文件名
-                torrent_path: str | None = None
-                if item.get("torrent_url"):
-                    try:
-                        p = download_from_rmdown_url(
-                            item["torrent_url"],
-                            save_dir,
-                            filename=safe_name,
-                        )
-                        torrent_path = str(p)
-                        log.info("  TORRENT %s", p.name)
-                    except Exception as e:
-                        log.error("  TORRENT-ERR %s: %s", item["torrent_url"], e)
-                        continue
-
-                # 1.8：番号条目入库（title_transfer：与 code_title 不同的译文才写入）
-                ct = (item.get("code_title") or "").strip()
-                title_tr = (translate_code_title(item.get("code_title")) or "").strip()
-                title_transfer = (
-                    title_tr if title_tr and title_tr != ct else None
-                )
-                upsert_item(
-                    conn,
-                    thread_url=detail_url,
-                    code=item.get("code") or "unknown",
-                    code_title=item.get("code_title"),
-                    title_transfer=title_transfer,
-                    actress=item.get("actress"),
-                    size_gb=item.get("size_gb"),
-                    img_url=item.get("img_url"),
-                    img_path=img_path,
-                    torrent_url=item.get("torrent_url"),
-                    torrent_path=torrent_path,
+                _process_thread_patch(
+                    conn=conn,
+                    thread_url=thread["url"],
+                    title=thread["title"],
+                    save_dir=_patch_save_dir(conn, thread["url"], thread["title"], day_dir),
                     source=source,
+                    delay_sec=delay_sec,
                 )
-
-                if delay_sec > 0:
-                    time.sleep(delay_sec)
-
-            # 1.9（后半）：thread 状态更新为 done
-            update_thread_status(conn, detail_url, "done")
-            log.info("  OK %d 个番号处理完毕", len(items))
 
     finally:
         conn.close()
