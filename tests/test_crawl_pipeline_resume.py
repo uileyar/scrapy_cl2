@@ -126,3 +126,93 @@ class TestCrawlPipelineResume(unittest.TestCase):
             "SELECT status FROM threads WHERE url=?", ("http://t",)
         ).fetchone()
         self.assertEqual(row[0], "pending")
+
+    def test_patch_deletes_corrupt_db_image_in_old_dir(self) -> None:
+        old_dir = self.root / "old_assets"
+        old_dir.mkdir()
+        corrupt_img = old_dir / "C1 Title.jpg"
+        corrupt_img.write_bytes(b"not-a-jpg")
+
+        new_dir = self.root / "new_assets"
+        new_dir.mkdir()
+
+        upsert_thread(self.conn, "http://t", "T", status="done")
+        upsert_item(
+            self.conn,
+            "http://t",
+            "C1",
+            code_title="C1 Title",
+            img_url="http://img/1.jpg",
+            img_path=str(corrupt_img),
+            torrent_url=None,
+            torrent_path=None,
+        )
+
+        def fake_img(url, out_dir, filename=None, **kwargs):
+            path = Path(out_dir) / f"{filename}.jpg"
+            path.write_bytes(b"\xff\xd8\xff\xe0" + b"\x00" * 20)
+            return path.resolve()
+
+        with mock.patch(
+            "crawl_html.download_image_from_url", side_effect=fake_img
+        ) as image_download:
+            _process_thread_patch(
+                conn=self.conn,
+                thread_url="http://t",
+                title="T",
+                save_dir=new_dir,
+                source="zz",
+                delay_sec=0,
+            )
+            image_download.assert_called_once()
+
+        self.assertFalse(corrupt_img.exists())
+        items = list_items_for_thread(self.conn, "http://t")
+        new_path = Path(items[0]["img_path"])
+        self.assertTrue(new_path.is_file())
+        self.assertEqual(new_path.parent.resolve(), new_dir.resolve())
+
+    def test_patch_deletes_corrupt_db_torrent_in_old_dir(self) -> None:
+        old_dir = self.root / "old_assets"
+        old_dir.mkdir()
+        corrupt_torrent = old_dir / "C1 Title.torrent"
+        corrupt_torrent.write_bytes(b"")
+
+        new_dir = self.root / "new_assets"
+        new_dir.mkdir()
+
+        upsert_thread(self.conn, "http://t", "T", status="done")
+        upsert_item(
+            self.conn,
+            "http://t",
+            "C1",
+            code_title="C1 Title",
+            img_url=None,
+            img_path=None,
+            torrent_url="http://rm/1",
+            torrent_path=str(corrupt_torrent),
+        )
+
+        def fake_torrent(url, out_dir, filename=None, **kwargs):
+            path = Path(out_dir) / f"{filename}.torrent"
+            path.write_bytes(b"d4:infod4:name4:testee")
+            return path.resolve()
+
+        with mock.patch(
+            "crawl_html.download_from_rmdown_url", side_effect=fake_torrent
+        ) as torrent_download:
+            _process_thread_patch(
+                conn=self.conn,
+                thread_url="http://t",
+                title="T",
+                save_dir=new_dir,
+                source="zz",
+                delay_sec=0,
+            )
+            torrent_download.assert_called_once()
+
+        self.assertFalse(corrupt_torrent.exists())
+        items = list_items_for_thread(self.conn, "http://t")
+        new_path = Path(items[0]["torrent_path"])
+        self.assertTrue(new_path.is_file())
+        self.assertEqual(new_path.parent.resolve(), new_dir.resolve())

@@ -126,6 +126,10 @@ def _ensure_image(
     )
     if existing:
         return str(existing)
+    if img_path_db:
+        db_file = Path(img_path_db)
+        if db_file.is_file() and not is_valid_image_file(db_file):
+            db_file.unlink(missing_ok=True)
     for path in save_dir.glob(f"{safe_name}.*"):
         if (
             path.is_file()
@@ -153,6 +157,10 @@ def _ensure_torrent(
     )
     if existing:
         return str(existing)
+    if torrent_path_db:
+        db_file = Path(torrent_path_db)
+        if db_file.is_file() and not is_valid_torrent_file(db_file):
+            db_file.unlink(missing_ok=True)
     target = save_dir / f"{safe_name}.torrent"
     if target.is_file() and not is_valid_torrent_file(target):
         target.unlink(missing_ok=True)
