@@ -103,6 +103,9 @@ class TestCrawlPipelineResume(unittest.TestCase):
                 delay_sec=0,
             )
             image_download.assert_called_once()
+            self.assertEqual(
+                image_download.call_args.kwargs.get("referer"), "http://t"
+            )
             torrent_download.assert_not_called()
         self.assertTrue(thread_assets_complete(self.conn, "http://t"))
         items = list_items_for_thread(self.conn, "http://t")

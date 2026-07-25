@@ -147,6 +147,8 @@ def _ensure_image(
     img_path_db: str | None,
     save_dir: Path,
     safe_name: str,
+    *,
+    referer: str | None = None,
 ) -> str | None:
     if not img_url:
         return img_path_db if is_valid_image_file(img_path_db or "") else None
@@ -167,7 +169,14 @@ def _ensure_image(
         ):
             path.unlink(missing_ok=True)
     try:
-        return str(download_image_from_url(img_url, save_dir, filename=safe_name))
+        return str(
+            download_image_from_url(
+                img_url,
+                save_dir,
+                filename=safe_name,
+                referer=referer or "https://www.t66y.com/",
+            )
+        )
     except Exception as exc:
         log.error("  IMG-ERR %s: %s", img_url, exc)
         return None
@@ -237,7 +246,11 @@ def _process_thread_full(
         code_title = item.get("code_title") or code
         safe_name = _sanitize_filename(code_title)
         img_path = _ensure_image(
-            item.get("img_url"), prior.get("img_path"), save_dir, safe_name
+            item.get("img_url"),
+            prior.get("img_path"),
+            save_dir,
+            safe_name,
+            referer=detail_url,
         )
         torrent_path = _ensure_torrent(
             item.get("torrent_url"), prior.get("torrent_path"), save_dir, safe_name
@@ -293,7 +306,13 @@ def _process_thread_patch(
         img_path = item.get("img_path")
         torrent_path = item.get("torrent_path")
         if item.get("img_url") and not is_valid_image_file(img_path or ""):
-            img_path = _ensure_image(item["img_url"], img_path, save_dir, safe_name)
+            img_path = _ensure_image(
+                item["img_url"],
+                img_path,
+                save_dir,
+                safe_name,
+                referer=thread_url,
+            )
         if item.get("torrent_url") and not is_valid_torrent_file(torrent_path or ""):
             torrent_path = _ensure_torrent(
                 item["torrent_url"], torrent_path, save_dir, safe_name
