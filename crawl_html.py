@@ -14,11 +14,13 @@ from datetime import datetime
 from pathlib import Path
 
 from crawl_to_sqlite import (
+    RESUME_LOOKBACK_DAYS,
     ensure_db,
     item_needs_asset_retry,
     list_items_for_thread,
     list_pending_threads,
     list_thread_urls_with_missing_assets,
+    resume_since_iso,
     thread_assets_complete,
     thread_exists,
     update_thread_status,
@@ -78,9 +80,16 @@ def _sanitize_filename(name: str) -> str:
     return name[:120] or "file"
 
 
-def _build_work_queue(*, conn, list_threads: list[dict], source: str) -> list[dict]:
-    """合并列表页、待处理和缺失资源线程；全量处理优先于补丁处理。"""
+def _build_work_queue(
+    *,
+    conn,
+    list_threads: list[dict],
+    source: str,
+    lookback_days: int = RESUME_LOOKBACK_DAYS,
+) -> list[dict]:
+    """合并列表页、近 lookback_days 天的 pending / 缺资源线程；full 优先于 patch。"""
     del source
+    since = resume_since_iso(lookback_days)
     by_url: dict[str, dict] = {}
     for row in list_threads:
         by_url[row["url"]] = {
@@ -89,7 +98,8 @@ def _build_work_queue(*, conn, list_threads: list[dict], source: str) -> list[di
             "downloads": row.get("downloads") or 0,
             "mode": "full",
         }
-    for row in list_pending_threads(conn):
+    pending_rows = list_pending_threads(conn, since=since)
+    for row in pending_rows:
         if row["url"] not in by_url:
             by_url[row["url"]] = {
                 "url": row["url"],
@@ -97,7 +107,9 @@ def _build_work_queue(*, conn, list_threads: list[dict], source: str) -> list[di
                 "downloads": row.get("downloads") or 0,
                 "mode": "full",
             }
-    for url in list_thread_urls_with_missing_assets(conn):
+    missing_urls = list_thread_urls_with_missing_assets(conn, since=since)
+    patch_added = 0
+    for url in missing_urls:
         if url in by_url:
             continue
         row = conn.execute(
@@ -110,7 +122,24 @@ def _build_work_queue(*, conn, list_threads: list[dict], source: str) -> list[di
                 "downloads": row[2] or 0,
                 "mode": "patch",
             }
-    return list(by_url.values())
+            patch_added += 1
+    work = list(by_url.values())
+    n_full = sum(1 for t in work if t["mode"] == "full")
+    n_patch = sum(1 for t in work if t["mode"] == "patch")
+    log.info(
+        "工作队列: list_new=%d pending(近%d天)=%d missing(近%d天)=%d "
+        "→ queue=%d (full=%d patch=%d) since=%s",
+        len(list_threads),
+        lookback_days,
+        len(pending_rows),
+        lookback_days,
+        len(missing_urls),
+        len(work),
+        n_full,
+        n_patch,
+        since,
+    )
+    return work
 
 
 def _ensure_image(
@@ -341,6 +370,11 @@ def crawl_pipeline(
             if list_delay_sec > 0:
                 time.sleep(list_delay_sec)
 
+        log.info(
+            "列表收集完毕: 新帖 %d，开始扫描近 %d 天 pending/缺资源…",
+            len(all_threads),
+            RESUME_LOOKBACK_DAYS,
+        )
         work = _build_work_queue(conn=conn, list_threads=all_threads, source=source)
         for thread in work:
             if thread["mode"] != "full":

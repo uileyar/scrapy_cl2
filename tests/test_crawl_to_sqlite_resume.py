@@ -2,16 +2,18 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from crawl_to_sqlite import (
     ensure_db,
+    item_missing_for_queue,
     item_needs_asset_retry,
     list_candidate_missing_asset_rows,
     list_items_for_thread,
     list_pending_threads,
+    list_thread_urls_with_missing_assets,
     thread_assets_complete,
-    update_thread_status,
     upsert_item,
     upsert_thread,
 )
@@ -76,6 +78,49 @@ class TestCrawlToSqliteResume(unittest.TestCase):
         )
         item = list_items_for_thread(self.conn, "http://t")[0]
         self.assertTrue(item_needs_asset_retry(item))
+        self.assertTrue(item_missing_for_queue(item))
+
+    def test_pending_and_missing_respect_since(self) -> None:
+        upsert_thread(self.conn, "http://new", "New", status="pending")
+        upsert_thread(self.conn, "http://old", "Old", status="pending")
+        old_ts = (datetime.now(timezone.utc) - timedelta(days=10)).isoformat()
+        self.conn.execute(
+            "UPDATE threads SET crawled_at = ? WHERE url = ?",
+            (old_ts, "http://old"),
+        )
+        upsert_item(
+            self.conn, "http://miss-new", "C1",
+            img_url="http://img/1.jpg", img_path=None,
+        )
+        upsert_item(
+            self.conn, "http://miss-old", "C2",
+            img_url="http://img/2.jpg", img_path=None,
+        )
+        self.conn.execute(
+            "UPDATE items SET crawled_at = ? WHERE thread_url = ?",
+            (old_ts, "http://miss-old"),
+        )
+        self.conn.commit()
+        since = (datetime.now(timezone.utc) - timedelta(days=3)).isoformat()
+        pending = [r["url"] for r in list_pending_threads(self.conn, since=since)]
+        self.assertIn("http://new", pending)
+        self.assertNotIn("http://old", pending)
+        missing = list_thread_urls_with_missing_assets(self.conn, since=since)
+        self.assertIn("http://miss-new", missing)
+        self.assertNotIn("http://miss-old", missing)
+
+    def test_queue_missing_uses_exists_not_magic(self) -> None:
+        """Corrupt-but-present file: queue scan skips; done check still retries."""
+        bad = self.files / "bad.jpg"
+        bad.write_bytes(b"<html>not image</html>")
+        upsert_item(
+            self.conn, "http://t", "C1",
+            img_url="http://img/1.jpg", img_path=str(bad),
+        )
+        item = list_items_for_thread(self.conn, "http://t")[0]
+        self.assertFalse(item_missing_for_queue(item))
+        self.assertTrue(item_needs_asset_retry(item))
+        self.assertEqual(list_thread_urls_with_missing_assets(self.conn), [])
 
 
 if __name__ == "__main__":

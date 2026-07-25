@@ -6,15 +6,23 @@ SQLite 数据层：threads 表（列表页条目）+ items 表（详情页番号
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
-from local_assets import is_valid_image_file, is_valid_torrent_file
+from local_assets import asset_path_on_disk, is_valid_image_file, is_valid_torrent_file
+
+# 续跑/补缺默认只扫近 N 天（按 crawled_at）
+RESUME_LOOKBACK_DAYS = 3
 
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def resume_since_iso(days: int = RESUME_LOOKBACK_DAYS) -> str:
+    """UTC ISO 下界：只处理 crawled_at >= 该时刻的库记录。"""
+    return (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
 
 
 _CREATE_THREADS = """
@@ -144,11 +152,24 @@ def upsert_item(
     conn.commit()
 
 
-def list_pending_threads(conn: sqlite3.Connection) -> list[dict]:
+def list_pending_threads(
+    conn: sqlite3.Connection,
+    *,
+    since: Optional[str] = None,
+) -> list[dict]:
     conn.row_factory = sqlite3.Row
-    rows = conn.execute(
-        "SELECT url, title, downloads, source, status FROM threads WHERE status = 'pending'"
-    ).fetchall()
+    if since:
+        rows = conn.execute(
+            """
+            SELECT url, title, downloads, source, status FROM threads
+            WHERE status = 'pending' AND crawled_at >= ?
+            """,
+            (since,),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT url, title, downloads, source, status FROM threads WHERE status = 'pending'"
+        ).fetchall()
     result = [dict(r) for r in rows]
     conn.row_factory = None
     return result
@@ -169,31 +190,52 @@ def list_items_for_thread(conn: sqlite3.Connection, thread_url: str) -> list[dic
     return result
 
 
-def list_candidate_missing_asset_rows(conn: sqlite3.Connection) -> list[dict]:
+def list_candidate_missing_asset_rows(
+    conn: sqlite3.Connection,
+    *,
+    since: Optional[str] = None,
+) -> list[dict]:
     """SQL candidates: has URL and (path NULL/empty). File-missing-with-path checked in Python."""
     conn.row_factory = sqlite3.Row
-    rows = conn.execute(
-        """
+    sql = """
         SELECT thread_url, code, img_url, img_path, torrent_url, torrent_path
         FROM items
         WHERE
-          (img_url IS NOT NULL AND img_url != '' AND (img_path IS NULL OR img_path = ''))
-          OR
-          (torrent_url IS NOT NULL AND torrent_url != ''
-           AND (torrent_path IS NULL OR torrent_path = ''))
-        """
-    ).fetchall()
+          (
+            (img_url IS NOT NULL AND img_url != '' AND (img_path IS NULL OR img_path = ''))
+            OR
+            (torrent_url IS NOT NULL AND torrent_url != ''
+             AND (torrent_path IS NULL OR torrent_path = ''))
+          )
+    """
+    params: tuple = ()
+    if since:
+        sql += " AND crawled_at >= ?"
+        params = (since,)
+    rows = conn.execute(sql, params).fetchall()
     result = [dict(r) for r in rows]
     conn.row_factory = None
     return result
 
 
 def item_needs_asset_retry(item: dict) -> bool:
+    """下载完成判定：有 URL 则要求本地文件通过内容校验。"""
     img_url = (item.get("img_url") or "").strip()
     tor_url = (item.get("torrent_url") or "").strip()
     if img_url and not is_valid_image_file(item.get("img_path") or ""):
         return True
     if tor_url and not is_valid_torrent_file(item.get("torrent_path") or ""):
+        return True
+    return False
+
+
+def item_missing_for_queue(item: dict) -> bool:
+    """建队列用：有 URL 但 path 空或文件不存在（不读 magic，避免全库扫描过慢）。"""
+    img_url = (item.get("img_url") or "").strip()
+    tor_url = (item.get("torrent_url") or "").strip()
+    if img_url and not asset_path_on_disk(item.get("img_path")):
+        return True
+    if tor_url and not asset_path_on_disk(item.get("torrent_path")):
         return True
     return False
 
@@ -205,21 +247,30 @@ def thread_assets_complete(conn: sqlite3.Connection, thread_url: str) -> bool:
     return not any(item_needs_asset_retry(it) for it in items)
 
 
-def list_thread_urls_with_missing_assets(conn: sqlite3.Connection) -> list[str]:
+def list_thread_urls_with_missing_assets(
+    conn: sqlite3.Connection,
+    *,
+    since: Optional[str] = None,
+) -> list[str]:
     urls: set[str] = set()
-    for row in list_candidate_missing_asset_rows(conn):
+    for row in list_candidate_missing_asset_rows(conn, since=since):
         urls.add(row["thread_url"])
     conn.row_factory = sqlite3.Row
-    rows = conn.execute(
-        """
+    sql = """
         SELECT thread_url, img_url, img_path, torrent_url, torrent_path FROM items
-        WHERE (img_url IS NOT NULL AND img_url != '' AND img_path IS NOT NULL AND img_path != '')
-           OR (torrent_url IS NOT NULL AND torrent_url != ''
-               AND torrent_path IS NOT NULL AND torrent_path != '')
-        """
-    ).fetchall()
+        WHERE (
+          (img_url IS NOT NULL AND img_url != '' AND img_path IS NOT NULL AND img_path != '')
+          OR (torrent_url IS NOT NULL AND torrent_url != ''
+              AND torrent_path IS NOT NULL AND torrent_path != '')
+        )
+    """
+    params: tuple = ()
+    if since:
+        sql += " AND crawled_at >= ?"
+        params = (since,)
+    rows = conn.execute(sql, params).fetchall()
     for r in rows:
-        if item_needs_asset_retry(dict(r)):
+        if item_missing_for_queue(dict(r)):
             urls.add(r["thread_url"])
     conn.row_factory = None
     return sorted(urls)

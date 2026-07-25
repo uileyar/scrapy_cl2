@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -38,6 +39,20 @@ class TestCrawlPipelineResume(unittest.TestCase):
         self.assertEqual(len(queue), 1)
         self.assertEqual(queue[0]["url"], "http://old")
         self.assertEqual(queue[0]["mode"], "full")
+
+    def test_queue_skips_pending_older_than_lookback(self) -> None:
+        upsert_thread(self.conn, "http://fresh", "Fresh", status="pending")
+        upsert_thread(self.conn, "http://stale", "Stale", status="pending")
+        stale_ts = (datetime.now(timezone.utc) - timedelta(days=10)).isoformat()
+        self.conn.execute(
+            "UPDATE threads SET crawled_at = ? WHERE url = ?",
+            (stale_ts, "http://stale"),
+        )
+        self.conn.commit()
+        queue = _build_work_queue(conn=self.conn, list_threads=[], source="zz")
+        urls = [t["url"] for t in queue]
+        self.assertIn("http://fresh", urls)
+        self.assertNotIn("http://stale", urls)
 
     def test_queue_patch_for_done_missing_img(self) -> None:
         upsert_thread(self.conn, "http://t", "T", status="done")

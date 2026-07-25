@@ -8,12 +8,23 @@ from typing import Literal, Optional
 from image_download import _detect_image_ext
 
 
+def asset_path_on_disk(path: str | Path | None) -> bool:
+    """轻量存在性检查（建队列用，不读文件内容）。"""
+    if not path:
+        return False
+    try:
+        return Path(path).is_file()
+    except OSError:
+        return False
+
+
 def is_valid_image_file(path: str | Path) -> bool:
     p = Path(path)
     if not p.is_file():
         return False
     try:
-        data = p.read_bytes()
+        with p.open("rb") as f:
+            data = f.read(64)
     except OSError:
         return False
     if not data:
