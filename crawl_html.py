@@ -147,8 +147,6 @@ def _ensure_image(
     img_path_db: str | None,
     save_dir: Path,
     safe_name: str,
-    *,
-    referer: str | None = None,
 ) -> str | None:
     if not img_url:
         return img_path_db if is_valid_image_file(img_path_db or "") else None
@@ -174,7 +172,7 @@ def _ensure_image(
                 img_url,
                 save_dir,
                 filename=safe_name,
-                referer=referer or "https://www.t66y.com/",
+                referer="https://www.t66y.com/",
             )
         )
     except Exception as exc:
@@ -250,7 +248,6 @@ def _process_thread_full(
             prior.get("img_path"),
             save_dir,
             safe_name,
-            referer=detail_url,
         )
         torrent_path = _ensure_torrent(
             item.get("torrent_url"), prior.get("torrent_path"), save_dir, safe_name
@@ -311,7 +308,6 @@ def _process_thread_patch(
                 img_path,
                 save_dir,
                 safe_name,
-                referer=thread_url,
             )
         if item.get("torrent_url") and not is_valid_torrent_file(torrent_path or ""):
             torrent_path = _ensure_torrent(
