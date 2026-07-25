@@ -7,3 +7,5 @@ sample/
 .claude/
 .cursor/hooks.json
 research/
+.superpowers/
+docs/

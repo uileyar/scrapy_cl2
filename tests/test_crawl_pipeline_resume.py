@@ -82,13 +82,61 @@ class TestCrawlPipelineResume(unittest.TestCase):
             code_title="C1 Title",
             img_url="http://img/1.jpg",
             img_path=None,
-            torrent_url=None,
-            torrent_path=None,
+            torrent_url="http://rm/1",
+            torrent_path="/missing/x.torrent",
             source="zz",
         )
         queue = _build_work_queue(conn=self.conn, list_threads=[], source="zz")
         self.assertEqual(queue[0]["mode"], "patch")
         self.assertEqual(queue[0]["url"], "http://t")
+
+    def test_queue_full_when_torrent_url_missing(self) -> None:
+        """缺种子 URL 必须 full 重解析，不能 patch。"""
+        upsert_thread(self.conn, "http://t", "T", source="zz", status="done")
+        upsert_item(
+            self.conn,
+            "http://t",
+            "C1",
+            code_title="C1 Title",
+            img_url="http://img/1.jpg",
+            img_path=str(self.root / "a.jpg"),
+            torrent_url=None,
+            torrent_path=None,
+            source="zz",
+        )
+        (self.root / "a.jpg").write_bytes(b"\xff\xd8\xff\xe0" + b"\x00" * 20)
+        queue = _build_work_queue(conn=self.conn, list_threads=[], source="zz")
+        self.assertEqual(len(queue), 1)
+        self.assertEqual(queue[0]["mode"], "full")
+        self.assertEqual(queue[0]["url"], "http://t")
+
+    def test_full_without_torrent_url_stays_pending(self) -> None:
+        upsert_thread(self.conn, "http://t", "T", status="pending")
+        with mock.patch(
+            "crawl_html.fetch_and_parse_detail",
+            return_value=[{
+                "code": "C1",
+                "code_title": "C1 Title",
+                "actress": None,
+                "size_gb": "3.0",
+                "img_url": None,
+                "torrent_url": None,
+            }],
+        ), mock.patch("crawl_html.translate_code_title", return_value=None):
+            from crawl_html import _process_thread_full
+
+            _process_thread_full(
+                conn=self.conn,
+                thread={"url": "http://t", "title": "T", "downloads": 0},
+                day_dir=self.dl,
+                source="zz",
+                delay_sec=0,
+            )
+        row = self.conn.execute(
+            "SELECT status FROM threads WHERE url=?", ("http://t",)
+        ).fetchone()
+        self.assertEqual(row[0], "pending")
+        self.assertFalse(thread_assets_complete(self.conn, "http://t"))
 
     def test_patch_downloads_only_missing_and_skips_existing(self) -> None:
         files = self.root / "assets"
@@ -225,13 +273,18 @@ class TestCrawlPipelineResume(unittest.TestCase):
                 "actress": None,
                 "size_gb": "3.0",
                 "img_url": None,
-                "torrent_url": None,
+                "torrent_url": "http://rm/2",
             },
         ]
 
+        def fake_torrent(url, out_dir, filename=None, **kwargs):
+            path = Path(out_dir) / f"{filename}.torrent"
+            path.write_bytes(b"d4:infod4:name4:testee")
+            return path.resolve()
+
         with mock.patch("crawl_html.fetch_and_parse_detail", return_value=parsed_items), \
              mock.patch("crawl_html.download_image_from_url") as image_download, \
-             mock.patch("crawl_html.download_from_rmdown_url") as torrent_download, \
+             mock.patch("crawl_html.download_from_rmdown_url", side_effect=fake_torrent) as torrent_download, \
              mock.patch("crawl_html.translate_code_title", return_value=None):
             from crawl_html import _process_thread_full
 
@@ -247,7 +300,7 @@ class TestCrawlPipelineResume(unittest.TestCase):
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]["code"], "C2")
         image_download.assert_not_called()
-        torrent_download.assert_not_called()
+        torrent_download.assert_called_once()
         row = self.conn.execute(
             "SELECT status FROM threads WHERE url=?", ("http://t",)
         ).fetchone()

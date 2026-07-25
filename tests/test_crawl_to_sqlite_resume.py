@@ -64,7 +64,7 @@ class TestCrawlToSqliteResume(unittest.TestCase):
         upsert_item(
             self.conn, "http://t", "CODE-2",
             img_url=None, img_path=None,
-            torrent_url=None, torrent_path=None,
+            torrent_url="http://rm/2", torrent_path=str(tor),
         )
         self.assertTrue(thread_assets_complete(self.conn, "http://t"))
         self.assertFalse(item_needs_asset_retry(list_items_for_thread(self.conn, "http://t")[0]))
@@ -129,14 +129,98 @@ class TestCrawlToSqliteResume(unittest.TestCase):
         """Corrupt-but-present file: queue scan skips; done check still retries."""
         bad = self.files / "bad.jpg"
         bad.write_bytes(b"<html>not image</html>")
+        tor = self.files / "ok.torrent"
+        tor.write_bytes(b"d4:infod4:name4:testee")
         upsert_item(
             self.conn, "http://t", "C1",
             img_url="http://img/1.jpg", img_path=str(bad),
+            torrent_url="http://rm/1", torrent_path=str(tor),
         )
         item = list_items_for_thread(self.conn, "http://t")[0]
         self.assertFalse(item_missing_for_queue(item))
         self.assertTrue(item_needs_asset_retry(item))
         self.assertEqual(list_thread_urls_with_missing_assets(self.conn), [])
+
+    def test_items_column_order(self) -> None:
+        cols = [r[1] for r in self.conn.execute("PRAGMA table_info(items)")]
+        self.assertEqual(
+            cols,
+            [
+                "id",
+                "thread_url",
+                "source",
+                "code",
+                "actress",
+                "size_gb",
+                "title",
+                "code_title",
+                "title_transfer",
+                "img_url",
+                "img_path",
+                "torrent_url",
+                "torrent_path",
+                "crawled_at",
+            ],
+        )
+
+    def test_ensure_db_reorders_items_columns_on_legacy_schema(self) -> None:
+        self.conn.close()
+        legacy = Path(self.tmp.name) / "legacy.db"
+        raw = __import__("sqlite3").connect(legacy)
+        try:
+            raw.execute(
+                """
+                CREATE TABLE items (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    thread_url TEXT NOT NULL,
+                    code TEXT NOT NULL,
+                    code_title TEXT,
+                    actress TEXT,
+                    size_gb TEXT,
+                    img_url TEXT,
+                    img_path TEXT,
+                    torrent_url TEXT,
+                    torrent_path TEXT,
+                    crawled_at TEXT NOT NULL,
+                    source TEXT DEFAULT '',
+                    title_transfer TEXT,
+                    title TEXT,
+                    UNIQUE(thread_url, code)
+                )
+                """
+            )
+            raw.execute(
+                """
+                INSERT INTO items (
+                    id, thread_url, code, code_title, actress, size_gb,
+                    img_url, img_path, torrent_url, torrent_path,
+                    crawled_at, source, title_transfer, title
+                ) VALUES (
+                    7, 'http://t', 'AB-1', 'old title', '花子', '1.2',
+                    'http://img', 'p.jpg', 'http://tor', 't.torrent',
+                    '2026-01-01T00:00:00+00:00', 'src', 'zh', '片名'
+                )
+                """
+            )
+            raw.commit()
+        finally:
+            raw.close()
+
+        conn = ensure_db(legacy)
+        try:
+            cols = [r[1] for r in conn.execute("PRAGMA table_info(items)")]
+            self.assertEqual(cols[cols.index("thread_url") + 1], "source")
+            self.assertEqual(cols[cols.index("source") + 1], "code")
+            self.assertEqual(cols[cols.index("actress") + 1], "size_gb")
+            self.assertEqual(cols[cols.index("size_gb") + 1], "title")
+            row = conn.execute(
+                "SELECT id, source, code, actress, size_gb, title, code_title FROM items"
+            ).fetchone()
+            self.assertEqual(
+                row, (7, "src", "AB-1", "花子", "1.2", "片名", "old title")
+            )
+        finally:
+            conn.close()
 
 
 if __name__ == "__main__":

@@ -13,11 +13,13 @@ import time
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
+from actress_extract import configure_actress_dict
 
 from crawl_to_sqlite import (
     RESUME_LOOKBACK_DAYS,
     ensure_db,
     item_needs_asset_retry,
+    item_needs_detail_reparse,
     list_items_for_thread,
     list_pending_threads,
     list_thread_urls_with_missing_assets,
@@ -36,6 +38,7 @@ from title_translate import translate_code_title
 from local_assets import (
     is_valid_image_file,
     is_valid_torrent_file,
+    iter_stem_paths,
     resolve_asset_path,
 )
 
@@ -119,13 +122,19 @@ def _build_work_queue(
             (url, source),
         ).fetchone()
         if row:
+            # 缺种子 URL 必须 full 重解析；仅缺本地文件才 patch
+            needs_reparse = any(
+                item_needs_detail_reparse(it)
+                for it in list_items_for_thread(conn, url)
+            )
             by_url[url] = {
                 "url": row[0],
                 "title": row[1] or "",
                 "downloads": row[2] or 0,
-                "mode": "patch",
+                "mode": "full" if needs_reparse else "patch",
             }
-            patch_added += 1
+            if not needs_reparse:
+                patch_added += 1
     work = list(by_url.values())
     n_full = sum(1 for t in work if t["mode"] == "full")
     n_patch = sum(1 for t in work if t["mode"] == "patch")
@@ -175,7 +184,7 @@ def _ensure_image(
         db_file = Path(img_path_db)
         if db_file.is_file() and not is_valid_image_file(db_file):
             db_file.unlink(missing_ok=True)
-    for path in save_dir.glob(f"{safe_name}.*"):
+    for path in iter_stem_paths(save_dir, safe_name):
         if (
             path.is_file()
             and path.suffix.lower() != ".torrent"
@@ -275,6 +284,7 @@ def _process_thread_full(
             conn,
             thread_url=detail_url,
             code=code,
+            title=item.get("title"),
             code_title=item.get("code_title"),
             title_transfer=title_transfer,
             actress=item.get("actress"),
@@ -335,6 +345,7 @@ def _process_thread_patch(
             conn,
             thread_url=thread_url,
             code=item["code"],
+            title=item.get("title"),
             code_title=item.get("code_title"),
             title_transfer=item.get("title_transfer"),
             actress=item.get("actress"),
@@ -526,6 +537,7 @@ def main() -> int:
         source = args.source
 
     try:
+        configure_actress_dict(db_path=db_path, table="actress_names_minnano")
         crawl_pipeline(
             source=source,
             download_dir=download_dir,

@@ -4,12 +4,20 @@
 """
 from __future__ import annotations
 
+import html
 import json
 import re
 from html.parser import HTMLParser
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
 from http_fetch import fetch_html as _fetch_html
+from actress_extract import extract_actress
+
+# 封面候选：排除广告 GIF/广告域，优先图床与 /upload/files/
+_AD_HOST_MARKERS = ("avspda.xyz", "51688.cc")
+_POSTER_HOSTS = ("picdcd.com", "odjsk.com", "gdvdvb.com", "adipcd.com")
+_POSTER_EXTS = (".jpg", ".jpeg", ".png", ".webp")
 
 VOID_TAGS = frozenset(
     {
@@ -30,7 +38,31 @@ VOID_TAGS = frozenset(
     }
 )
 
-CODE_RE = re.compile(r"(?<![A-Za-z0-9])\d*([A-Z]{2,}-?\d{2,})(?![A-Za-z0-9])")
+CODE_RE = re.compile(
+    r"(?<![A-Za-z0-9])\d*([A-Z]{2,}-?\d{2,})(?:[A-Za-z](?![A-Za-z0-9]))?(?![A-Za-z0-9])"
+)
+# FC2 必须优先于 CODE_RE，否则 FC2-PPV-123 会被误判成 PPV-123
+FC2_CODE_RE = re.compile(
+    r"(?<![A-Za-z0-9])(FC2[-_]?PPV[-_]?\d{3,}|FC2[-_]?\d{5,})(?![A-Za-z0-9])",
+    re.I,
+)
+# 欧美点分：Studio.YY.MM.DD.Name...（整段为 code）
+WESTERN_DOT_CODE_RE = re.compile(
+    r"(?<![A-Za-z0-9.])("
+    r"[A-Za-z][A-Za-z0-9]*"
+    r"(?:\.\d{2}){3}"
+    r"(?:\.[A-Za-z][A-Za-z0-9]*)+"
+    r")(?![A-Za-z0-9.])"
+)
+# h4 无番号时剥掉前缀元数据，剩余作 title
+_H4_META_PREFIX_RE = re.compile(
+    r"^(?:"
+    r"新作|熱門|精品|"
+    r"\[[^\]]*\]|"
+    r"【[^】]*】|"
+    r"\s+"
+    r")+"
+)
 SIZE_HD_RE = re.compile(r"\[HD/\s*([\d.]+)\s*GB?\]", re.I)
 SIZE_MP4_RE = re.compile(r"\[MP4/\s*([\d.]+)\s*GB?\]", re.I)
 SIZE_MP4_FW_RE = re.compile(r"【\s*MP4/\s*([\d.]+)\s*GB?\s*】", re.I)
@@ -41,115 +73,6 @@ SIZE_PLAIN_ALT_RE = re.compile(
     r"(?:SD|HD)?-?MP4-(\d+\.?\d*)\s*GB\b",
     re.I,
 )
-FILM_NAME_FIELD_RE = re.compile(r"【影片名[稱称]】[︰：:]([^\n]+)")
-CHINESE_TITLE_FIELD_RE = re.compile(r"【中文片名】[︰：:]([^\n]+)")
-_ACTRESS_TITLE_JUNK = frozenset(
-    {
-        "紀錄片",
-        "纪录片",
-        "中文字幕",
-        "高清",
-        "有碼",
-        "無碼",
-        "无码",
-        "字幕",
-        "女优",
-        "女優",
-        "合集",
-        "精選",
-        "精选",
-        "系列",
-        "限定",
-        "初回",
-        "版",
-    }
-)
-# 长叙事 h4/片名尾段易误判的短语（非人名）
-_ACTRESS_CN_PHRASE_JUNK = frozenset(
-    {
-        "青春性交",
-        "首次拍摄",
-        "我在有乐町搭讪",
-        "身材却完美无瑕",
-        "真的是软派",
-        "首部作品",
-        "女优合集",
-        "女優合集",
-        "她年纪轻轻",
-    }
-)
-# 片名里常见全大写英文词，非人名（避免「NO.1 STYLE」误认艺名）
-_ACTRESS_LATIN_JUNK = frozenset(
-    {
-        "STYLE",
-        "BODY",
-        "LOVE",
-        "LOVER",
-        "HEART",
-        "STAR",
-        "STARS",
-        "SWEET",
-        "CUTE",
-        "COOL",
-        "PINK",
-        "BLUE",
-        "MODE",
-        "BEAUTY",
-        "BEST",
-        "DREAM",
-        "NIGHT",
-        "ANGEL",
-        "DEVIL",
-        "HONEY",
-        "ROSE",
-        "APPLE",
-        "QUEEN",
-        "GIRL",
-        "LADY",
-        "PRINCESS",
-        "NEW",
-        "TRUE",
-        "PURE",
-        "DEEP",
-        "HIGH",
-        "MASTER",
-        "LIMITED",
-        "SPECIAL",
-        "DEBUT",
-    }
-)
-# 标题尾段猜女优：纯 CJK 候选最长（过长多为叙事句；结构化【出演女优】不受限）
-_ACTRESS_GUESS_CJK_MAX_LEN = 7
-# 句末语气/感叹碎片，勿当人名（如「太瘋狂了」）
-_ACTRESS_FRAG_ENDINGS = (
-    "了",
-    "嗎",
-    "吧",
-    "呢",
-    "啊",
-    "呀",
-    "喔",
-    "嘛",
-    "哎",
-    "嘿",
-    "哈",
-    "呐",
-    "咯",
-)
-# 片名/标题尾部候选：中日文姓名常见字符（含假名・）
-_ACTRESS_TOKEN_RE = re.compile(
-    r"^[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff・]{2,16}$",
-)
-_ACTRESS_TOKEN_ONE_RE = re.compile(
-    r"^[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff・]$",
-)
-_ACTRESS_SINGLE_HANZI_RE = re.compile(r"^[\u4e00-\u9fff]$")
-_ACTRESS_TOPIC_NAME_RE = re.compile(
-    r"(?:[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff・]{0,12}影片)?"
-    r"([\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff・]{2,12})(?:作品|合集|影片)"
-)
-# 片名中「【妻子・環奈】」类角色格内的人名（・后一节）
-_ROLE_DOT_NAME_RE = re.compile(r"【[^】]{0,32}・([^】]{1,12})】")
 H4_F16_RE = re.compile(
     r'<h4[^>]*\bclass\s*=\s*["\'][^"\']*\bf16\b[^"\']*["\'][^>]*>(.*?)</h4>',
     re.I | re.DOTALL,
@@ -166,6 +89,49 @@ def _normalize_code(code: str) -> str:
     if m:
         return f"{m.group(1)}-{m.group(2)}"
     return code
+
+
+def _normalize_fc2_code(raw: str) -> str:
+    s = re.sub(r"[-_]+", "", raw.upper())
+    m = re.match(r"^FC2PPV(\d+)$", s)
+    if m:
+        return f"FC2PPV-{m.group(1)}"
+    m = re.match(r"^FC2(\d+)$", s)
+    if m:
+        return f"FC2-{m.group(1)}"
+    return raw.upper()
+
+
+def _code_and_title_from_h4(h4_text: str) -> tuple[Optional[str], Optional[str]]:
+    """从 h4 提取 (code, title)。title = 番号后完整剩余；无番号则回退剥前缀后的全文。"""
+    text = (h4_text or "").strip()
+    if not text:
+        return None, None
+
+    # 1) FC2 优先，避免 FC2-PPV-123 → PPV-123
+    m = FC2_CODE_RE.search(text)
+    if m:
+        code = _normalize_fc2_code(m.group(1))
+        title = text[m.end() :].strip() or None
+        return code, title
+
+    # 2) 欧美点分整段 ID
+    m = WESTERN_DOT_CODE_RE.search(text)
+    if m:
+        code = m.group(1)
+        title = text[m.end() :].strip() or None
+        return code, title
+
+    # 3) 日系标准番号
+    m = CODE_RE.search(text)
+    if m:
+        code = _normalize_code(m.group(1))
+        title = text[m.end() :].strip() or None
+        return code, title
+
+    # 4) 无番号：剥掉 [標籤]/新作 等前缀，剩余作 title
+    rest = _H4_META_PREFIX_RE.sub("", text).strip()
+    return None, rest or None
 
 
 def strip_html_tags(fragment: str) -> str:
@@ -317,211 +283,6 @@ def _size_gb_from_plain(plain: str) -> Optional[str]:
     return None
 
 
-def _strip_leading_bracket_tags(text: str) -> str:
-    """去掉标题前连续 [有碼] [HD/xG] 等方括号标签。"""
-    t = text.strip()
-    return re.sub(r"(?:\[[^\]]*\]\s*)+", "", t).strip()
-
-
-def _is_single_hanzi_tail_name(tok: str) -> bool:
-    return bool(_ACTRESS_SINGLE_HANZI_RE.fullmatch(tok))
-
-
-def _actress_names_from_role_brackets(text: str) -> Optional[str]:
-    """从「【头衔・人名】」格式中收集・后人名（多女优以顿号连接）。"""
-    names: List[str] = []
-    seen: set[str] = set()
-    for m in _ROLE_DOT_NAME_RE.finditer(text):
-        n = m.group(1).strip(" 　「」『』")
-        if not n:
-            continue
-        ok = bool(_ACTRESS_TOKEN_RE.match(n)) or bool(_ACTRESS_TOKEN_ONE_RE.match(n))
-        if not ok or len(n) > 12:
-            continue
-        if n not in seen:
-            seen.add(n)
-            names.append(n)
-    if not names:
-        return None
-    return "、".join(names)
-
-
-def _strip_jav_debut_name_suffix(tok: str) -> str:
-    """「乃坂日和AV出道」类：去掉尾部 AV/AV出道，得到纯名。"""
-    m = re.match(
-        r"^([\u4e00-\u9fff\u3040-\u30ff・]{2,12})AV(?:出道|デビュー|DEBUT)?$",
-        tok,
-        re.I,
-    )
-    if m:
-        return m.group(1)
-    return tok
-
-
-def _actress_guess_from_title_tail(text: str) -> Optional[str]:
-    """从番号后的标题尾段猜女优名：先认【・】角色格；再自尾向首认全大写拉丁艺名；否则认中日文 token。"""
-    if not text or not text.strip():
-        return None
-    role = _actress_names_from_role_brackets(text)
-    if role:
-        return role
-    head = re.split(r"[\[【]", text, maxsplit=1)[0].strip()
-    if not head:
-        return None
-    parts = [p for p in re.split(r"[\s　，。、！!？?]+", head) if p]
-    for idx, tok in enumerate(reversed(parts)):
-        is_tail_token = idx == 0
-        t_raw = tok.strip(" 　「」『』【】（）()·")
-        t_raw = re.sub(r"《[^》]*》\s*$", "", t_raw).strip()
-        if len(t_raw) == 1:
-            if _is_single_hanzi_tail_name(t_raw):
-                return t_raw
-            return None
-        if len(t_raw) < 2:
-            continue
-        if (
-            2 <= len(t_raw) <= 15
-            and re.fullmatch(r"[A-Z]+", t_raw)
-            and t_raw not in _ACTRESS_LATIN_JUNK
-        ):
-            return t_raw
-        t = _strip_jav_debut_name_suffix(t_raw)
-        if t.endswith("的"):
-            if is_tail_token:
-                return None
-            continue
-        if "的" in t and len(t) > 5:
-            if is_tail_token:
-                return None
-            continue
-        if len(t) > _ACTRESS_GUESS_CJK_MAX_LEN:
-            if is_tail_token:
-                return None
-            continue
-        if len(t) <= 8 and t.endswith(_ACTRESS_FRAG_ENDINGS):
-            if is_tail_token:
-                return None
-            continue
-        if t in _ACTRESS_TITLE_JUNK:
-            if is_tail_token:
-                return None
-            continue
-        if t in _ACTRESS_CN_PHRASE_JUNK:
-            if is_tail_token:
-                return None
-            continue
-        if "搭讪" in t and len(t) >= 4:
-            if is_tail_token:
-                return None
-            continue
-        if "软派" in t:
-            if is_tail_token:
-                return None
-            continue
-        if not _ACTRESS_TOKEN_RE.match(t):
-            continue
-        if re.search(r"[a-zA-Z]{3,}", t):
-            continue
-        return t
-    return None
-
-
-def _actress_from_chinese_title_plain(plain: str) -> Optional[str]:
-    """【中文片名】行常为「长标题 + 空格 + 中文名」，优先于日文【影片名稱】启发式。"""
-    m = CHINESE_TITLE_FIELD_RE.search(plain)
-    if not m:
-        return None
-    raw = m.group(1).strip()
-    return _actress_guess_from_title_tail(raw)
-
-
-def _actress_from_topic_title(topic_title: Optional[str]) -> Optional[str]:
-    """Extract a single actress from topic titles like '瀧本雫葉作品'."""
-    if not topic_title:
-        return None
-    for m in _ACTRESS_TOPIC_NAME_RE.finditer(topic_title):
-        phrase = m.group(0).strip(" 　「」『』【】（）()")
-        name = m.group(1).strip(" 　「」『』【】（）()")
-        if phrase in _ACTRESS_TITLE_JUNK or phrase in _ACTRESS_CN_PHRASE_JUNK:
-            continue
-        if not name:
-            continue
-        if name in _ACTRESS_TITLE_JUNK or name in _ACTRESS_CN_PHRASE_JUNK:
-            continue
-        if _ACTRESS_TOKEN_RE.fullmatch(name):
-            return name
-    return None
-
-
-def _actress_from_film_name_plain(plain: str) -> Optional[str]:
-    """【影片名稱/名称】行内、番号后的标题尾段启发式。"""
-    m = FILM_NAME_FIELD_RE.search(plain)
-    if not m:
-        return None
-    raw = m.group(1).strip()
-    raw = re.sub(r"^\[[^\]]+\]\s*", "", raw)
-    cm = CODE_RE.search(raw)
-    if cm:
-        tail = raw[cm.end() :].strip()
-    else:
-        tail = raw
-    tail = _strip_leading_bracket_tags(tail)
-    return _actress_guess_from_title_tail(tail)
-
-
-def _actress_from_h4_tail(h4_text: str) -> Optional[str]:
-    """h4 中番号之后、去掉前导方括号块后的标题尾段启发式。"""
-    cm = CODE_RE.search(h4_text)
-    if not cm:
-        return None
-    tail = h4_text[cm.end() :].strip()
-    tail = _strip_leading_bracket_tags(tail)
-    return _actress_guess_from_title_tail(tail)
-
-
-def _actress_from_conttpc_plain(plain: str, h4_text: Optional[str] = None) -> Optional[str]:
-    """Priority: explicit labels, Chinese title, topic title evidence, film name, h4/title fallback."""
-    m = re.search(
-        r"出演者[：:]\s*(.+?)(?=監督|监督|制作|品番|配信|系列|収録|发行|商品|[\r\n]|\Z)",
-        plain,
-    )
-    if m:
-        a = m.group(1).strip()
-        if a and a != "----":
-            return a
-    m = re.search(
-        r"(?<!者)出演[：:]\s*([^\n\r<制作品番配信系列収録发行：:]+?)(?=制作|品番|配信|系列|収録|发行|[\s\r\n]|$)",
-        plain,
-    )
-    if m:
-        a = m.group(1).strip()
-        if a and a != "----":
-            return a
-    m = re.search(r"【(?:演出|出演)女[優优]】[︰：:]([^【\n]+)", plain)
-    if m:
-        a = m.group(1).strip()
-        if a != "----":
-            return a
-    # 正文标明出演者：----（总集等）时勿再用片名/h4 猜女优；【中文片名】仍可独占真名
-    skip_film_h4_actress_guess = bool(re.search(r"出演者[：:]\s*----", plain))
-    cz = _actress_from_chinese_title_plain(plain)
-    if cz:
-        return cz
-    topic = _actress_from_topic_title(h4_text)
-    if topic:
-        return topic
-    if skip_film_h4_actress_guess:
-        return None
-    g = _actress_from_film_name_plain(plain)
-    if g:
-        return g
-    if h4_text:
-        h = _actress_from_h4_tail(h4_text)
-        if h:
-            return h
-    return None
-
-
 def parse_detail_signal(
     html: str,
     h4_text: Optional[str],
@@ -534,20 +295,19 @@ def parse_detail_signal(
     item: Dict[str, Any] = {
         "code": None,
         "title": None,
-        "actress": _actress_from_conttpc_plain(plain, topic_title or h4_text),
+        "actress": extract_actress(plain, topic_title or h4_text),
         "size_gb": None,
-        "poster_url": img_urls[0] if img_urls else None,
+        "poster_url": _pick_poster_url(img_urls),
         "torrent_url": rmdown_hrefs[0] if rmdown_hrefs else None,
     }
     if h4_text:
         item["size_gb"] = _h4_size_gb(h4_text) or _size_gb_from_plain(plain)
-        cm = CODE_RE.search(h4_text)
-        if cm:
-            code = _normalize_code(cm.group(1))
+        code, title = _code_and_title_from_h4(h4_text)
+        if code:
             item["code"] = code
-            rest = h4_text[cm.end() :].strip()
-            item["title"] = rest or None
+            item["title"] = title
         else:
+            item["title"] = title
             errors.append("h4_no_code")
     else:
         errors.append("no_h4_f16")
@@ -587,16 +347,47 @@ def _parse_series_block_text(block: str) -> Optional[Dict[str, Any]]:
     }
 
 
+def _is_poster_candidate(url: str) -> bool:
+    """是否可作为封面：排除广告/GIF，接受图床或常见静态图扩展名。"""
+    if not url or not str(url).strip():
+        return False
+    raw = str(url).strip()
+    lower = raw.lower()
+    if "adblo_ck" in lower or "/ads/" in lower:
+        return False
+    if any(h in lower for h in _AD_HOST_MARKERS):
+        return False
+    parsed = urlparse(raw)
+    path = (parsed.path or "").lower()
+    if path.endswith(".gif"):
+        return False
+    host = (parsed.hostname or "").lower()
+    if any(host == h or host.endswith("." + h) for h in _POSTER_HOSTS):
+        return True
+    if "/upload/files/" in lower:
+        return True
+    return any(path.endswith(ext) for ext in _POSTER_EXTS)
+
+
+def _pick_poster_url(img_urls: List[str]) -> Optional[str]:
+    """从 img 列表中取第一张可用封面；无候选则 None（不强行用广告图）。"""
+    for url in img_urls:
+        if _is_poster_candidate(url):
+            return url
+    return None
+
+
 def _img_from_html_segment(seg_html: str) -> Optional[str]:
+    found: List[str] = []
     for rx in (
         r"ess-data\s*=\s*['\"]([^'\"]+)['\"]",
         r"src\s*=\s*['\"]([^'\"]+)['\"]",
     ):
         for m in re.finditer(rx, seg_html, re.I):
             url = m.group(1).strip()
-            if url and "adblo_ck" not in url:
-                return url
-    return None
+            if url:
+                found.append(url)
+    return _pick_poster_url(found)
 
 
 def _torrent_from_html_segment(seg_html: str) -> Optional[str]:
@@ -670,11 +461,12 @@ def parse_detail_series(
             parsed_blocks.append(pb)
 
     torrent_mode = "one_torrent" if len(rmdown_hrefs) <= 1 else "multi_torrent"
+    poster_urls = [u for u in img_urls if _is_poster_candidate(u)]
     items = []
     for i, pb in enumerate(parsed_blocks):
         it = dict(pb)
-        if i < len(img_urls):
-            it["poster_url"] = img_urls[i]
+        if i < len(poster_urls):
+            it["poster_url"] = poster_urls[i]
         else:
             it["poster_url"] = None
         if torrent_mode == "one_torrent" and rmdown_hrefs:
@@ -685,8 +477,10 @@ def parse_detail_series(
             it["torrent_url"] = None
         items.append(it)
 
-    if len(parsed_blocks) != len(img_urls) and parsed_blocks:
-        errors.append(f"img_count_mismatch blocks={len(parsed_blocks)} imgs={len(img_urls)}")
+    if len(parsed_blocks) != len(poster_urls) and parsed_blocks:
+        errors.append(
+            f"img_count_mismatch blocks={len(parsed_blocks)} imgs={len(poster_urls)}"
+        )
     if torrent_mode == "multi_torrent" and len(parsed_blocks) != len(rmdown_hrefs):
         errors.append(
             f"torrent_block_mismatch blocks={len(parsed_blocks)} torrents={len(rmdown_hrefs)}"
@@ -762,6 +556,8 @@ _TITLE_REMOVE = re.compile(
 
 
 def _clean_title(title: str) -> str:
+    title = html.unescape(title or "")
+    title = title.replace("\xa0", " ")
     title = title.replace("【", "[").replace("】", "]")
     title = _TITLE_REMOVE.sub("", title)
     title = re.sub(r"\s+", " ", title).strip()
@@ -771,7 +567,9 @@ def _clean_title(title: str) -> str:
 def parse_detail_items(html: str, topic_title: Optional[str] = None) -> List[Dict[str, Any]]:
     """解析详情页 HTML，返回标准化条目列表。
 
-    每个条目字段：``code``, ``code_title``, ``actress``, ``size_gb``, ``img_url``, ``torrent_url``。
+    每个条目字段：``code``, ``title``, ``code_title``, ``actress``, ``size_gb``,
+    ``img_url``, ``torrent_url``。
+    ``title`` 为清洗后的原始片名（未拼 actress/code/size）。
     """
     result = parse_detail_page(html, topic_title=topic_title)
     items: List[Dict[str, Any]] = []
@@ -779,9 +577,15 @@ def parse_detail_items(html: str, topic_title: Optional[str] = None) -> List[Dic
         code = raw.get("code") or ""
         actress = raw.get("actress")
         size_gb = raw.get("size_gb")
-        title = _clean_title(raw.get("title") or "")
+        raw_title = _clean_title(raw.get("title") or "")
+        title = raw_title
         if actress:
-            title = title.replace(actress, "").strip()
+            # actress 可能是「A|B」或多女优顿号拼接，标题里两人名字
+            # 未必是连续拼在一起的写法，需逐个去除而不是整段字符串匹配。
+            for single in re.split(r"[|、,，/]+", actress):
+                single = single.strip()
+                if single:
+                    title = title.replace(single, "").strip()
         title = re.sub(r"\(\s*\)|（\s*）", "", title)
         title = re.sub(r"\s+", " ", title).strip()
 
@@ -798,6 +602,7 @@ def parse_detail_items(html: str, topic_title: Optional[str] = None) -> List[Dic
 
         items.append({
             "code": code,
+            "title": raw_title or None,
             "code_title": code_title,
             "actress": actress,
             "size_gb": size_gb,

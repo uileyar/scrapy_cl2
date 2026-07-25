@@ -59,3 +59,25 @@ class TestLocalAssets(unittest.TestCase):
                 db_path=str(old), save_dir=new_dir, stem="CODE-001", kind="image"
             )
             self.assertEqual(got, old.resolve())
+
+    def test_find_existing_image_with_brackets_in_stem(self) -> None:
+        """glob 会把 [..] 当字符集；含方括号的文件名必须仍能命中。"""
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td)
+            stem = "女優 SMOK-042 1.6G [完全センセーション] OL"
+            img = d / f"{stem}.jpg"
+            img.write_bytes(b"\xff\xd8\xff\xe0" + b"\x00" * 20)
+            tor = d / f"{stem}.torrent"
+            tor.write_bytes(b"d4:infod4:name4:testee")
+            self.assertEqual(find_existing_image(d, stem), img.resolve())
+            self.assertEqual(find_existing_torrent(d, stem), tor.resolve())
+
+    def test_find_existing_image_prefers_exact_over_numbered(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td)
+            stem = "CODE [X]"
+            numbered = d / f"{stem}_1.jpg"
+            exact = d / f"{stem}.jpg"
+            numbered.write_bytes(b"\xff\xd8\xff\xe0" + b"\x00" * 20)
+            exact.write_bytes(b"\xff\xd8\xff\xe0" + b"\x00" * 30)
+            self.assertEqual(find_existing_image(d, stem), exact.resolve())

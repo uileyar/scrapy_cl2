@@ -2,6 +2,7 @@
 """本地图片/种子文件校验与下载前路径解析。"""
 from __future__ import annotations
 
+from glob import escape as glob_escape
 from pathlib import Path
 from typing import Literal, Optional
 
@@ -44,13 +45,28 @@ def is_valid_torrent_file(path: str | Path) -> bool:
         return False
 
 
-def find_existing_image(save_dir: Path, stem: str) -> Optional[Path]:
+def iter_stem_paths(save_dir: Path, stem: str) -> list[Path]:
+    """列出 stem.* / stem_*.*，对 [ ] 等 glob 元字符做转义。"""
     save_dir = Path(save_dir)
     if not save_dir.is_dir():
-        return None
-    # exact stem.* first, then stem_N.* leftovers from older runs
-    candidates = sorted(save_dir.glob(f"{stem}.*")) + sorted(save_dir.glob(f"{stem}_*.*"))
-    for p in candidates:
+        return []
+    esc = glob_escape(stem)
+    # exact first, then numbered leftovers from older collision runs
+    seen: set[Path] = set()
+    out: list[Path] = []
+    for p in list(save_dir.glob(f"{esc}.*")) + list(save_dir.glob(f"{esc}_*.*")):
+        rp = p.resolve() if p.exists() else p
+        if rp in seen:
+            continue
+        seen.add(rp)
+        out.append(p)
+    return out
+
+
+def find_existing_image(save_dir: Path, stem: str) -> Optional[Path]:
+    for p in iter_stem_paths(save_dir, stem):
+        if p.suffix.lower() == ".torrent":
+            continue
         if is_valid_image_file(p):
             return p.resolve()
     return None
@@ -63,7 +79,8 @@ def find_existing_torrent(save_dir: Path, stem: str) -> Optional[Path]:
         return exact.resolve()
     if not save_dir.is_dir():
         return None
-    for p in sorted(save_dir.glob(f"{stem}_*.torrent")):
+    esc = glob_escape(stem)
+    for p in sorted(save_dir.glob(f"{esc}_*.torrent")):
         if is_valid_torrent_file(p):
             return p.resolve()
     return None

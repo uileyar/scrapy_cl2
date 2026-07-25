@@ -6,15 +6,19 @@ import unittest
 from pathlib import Path
 from typing import Any, Dict, List
 
+from actress_extract import _ACTRESS_TOPIC_NAME_RE, extract_actress
 from detail_parse import (
-    _ACTRESS_TOPIC_NAME_RE,
-    _actress_from_conttpc_plain,
     _h4_size_gb,
+    _is_poster_candidate,
     _parse_series_block_text,
+    _pick_poster_url,
     parse_detail_items,
     parse_detail_page,
     walk_conttpc,
 )
+
+# 兼容旧测试名：原 detail_parse._actress_from_conttpc_plain 已迁到 extract_actress
+_actress_from_conttpc_plain = extract_actress
 
 _ROOT = Path(__file__).resolve().parent.parent
 
@@ -137,6 +141,7 @@ class TestDetailParseOffline(unittest.TestCase):
         """
         items = parse_detail_items(html, topic_title=topic)
         self.assertEqual(items[0].get("actress"), "瀧本雫葉")
+        self.assertEqual(items[0].get("title"), "朝まで過ごせる超高級デートクラブ")
         self.assertTrue(items[0].get("code_title", "").startswith("瀧本雫葉 ABF-235"))
 
     def test_actress_from_topic_title_beats_multi_name_film_title(self) -> None:
@@ -191,7 +196,7 @@ class TestDetailParseOffline(unittest.TestCase):
             "【影片名称】：[HD/4.32G]JUR-555 對不倫的【妻子・環奈】和【對象・純】扭入雞巴"
             "[有碼高清中文字幕]【影片格式】：MP4"
         )
-        self.assertEqual(_actress_from_conttpc_plain(p), "環奈、純")
+        self.assertEqual(_actress_from_conttpc_plain(p), "環奈|純")
 
     def test_actress_guess_latin_stage_name(self) -> None:
         """片名尾全大写拉丁艺名（如 JULIA）。"""
@@ -279,6 +284,46 @@ class TestDetailParseOffline(unittest.TestCase):
 
     def test_h4_bracket_sd_size(self) -> None:
         self.assertEqual(_h4_size_gb("[SD/1.5G] MAAN-1167 title"), "1.5")
+
+    def test_pick_poster_skips_ad_gifs(self) -> None:
+        """正文前广告 GIF 不得当封面；取首张 picdcd /upload/files 图。"""
+        poster = (
+            "https://picdcd.com/upload/files/2026/07/24/20260724174640fc2213.jpg"
+        )
+        urls = [
+            "https://avspda.xyz/upload/ads/202307281436545fd0b3.gif",
+            "http://kk.51688.cc/ya/bafish.gif",
+            "http://kk.51688.cc/ya/xv91.gif",
+            poster,
+            "https://picdcd.com/upload/files/2026/07/24/202607241746406c4b76.jpg",
+        ]
+        self.assertFalse(_is_poster_candidate(urls[0]))
+        self.assertFalse(_is_poster_candidate(urls[1]))
+        self.assertTrue(_is_poster_candidate(poster))
+        self.assertEqual(_pick_poster_url(urls), poster)
+
+    def test_signal_skips_leading_ad_images_skmj774(self) -> None:
+        """7356396 类帖：广告图在前时 signal 封面应为 picdcd 真图。"""
+        poster = (
+            "https://picdcd.com/upload/files/2026/07/24/20260724174640fc2213.jpg"
+        )
+        html = f"""
+        <h4 class="f16">[MP4/3.72G] SKMJ-774 盛夏比基尼企划</h4>
+        <div id="conttpc" class="tpc_content">
+          <img ess-data="https://avspda.xyz/upload/ads/202307281436545fd0b3.gif" />
+          <img src="http://kk.51688.cc/ya/bafish.gif" />
+          <img ess-data="{poster}" />
+          <img ess-data="https://picdcd.com/upload/files/2026/07/24/202607241746406c4b76.jpg" />
+          <br />【影片名称代号】：SKMJ-774 标题
+          <br />【影片大小】：3.72GB
+          <br /><a href="https://www.rmdown.com/link.php?hash=262c568a8e7ad43acaead7a6e420b28872b97f3cfd4">种子</a>
+        </div>
+        """
+        items = parse_detail_items(html, topic_title="SKMJ774")
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["code"], "SKMJ-774")
+        self.assertEqual(items[0]["img_url"], poster)
+        self.assertIn("rmdown.com", items[0]["torrent_url"] or "")
 
     def test_signal_atid663(self) -> None:
         html = _read("detail-signal.html")

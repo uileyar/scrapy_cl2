@@ -237,6 +237,13 @@ def download_image_from_url(
     name = _fix_ext_by_magic(name, data)
     path = out_dir / name
     if path.exists():
+        try:
+            head = path.read_bytes()[:64]
+        except OSError:
+            head = b""
+        # 已有合法图片则复用，避免生成 stem_1.jpg 重复文件
+        if head and _detect_image_ext(head) is not None:
+            return path.resolve()
         stem, suf = path.stem, path.suffix
         n = 1
         while path.exists():
