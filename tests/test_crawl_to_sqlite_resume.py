@@ -109,6 +109,22 @@ class TestCrawlToSqliteResume(unittest.TestCase):
         self.assertIn("http://miss-new", missing)
         self.assertNotIn("http://miss-old", missing)
 
+    def test_pending_and_missing_respect_source(self) -> None:
+        upsert_thread(self.conn, "http://zz", "Z", source="zz", status="pending")
+        upsert_thread(self.conn, "http://ym", "Y", source="ym", status="pending")
+        upsert_item(
+            self.conn, "http://zz-i", "C1",
+            img_url="http://img/1.jpg", img_path=None, source="zz",
+        )
+        upsert_item(
+            self.conn, "http://ym-i", "C2",
+            img_url="http://img/2.jpg", img_path=None, source="ym",
+        )
+        pending = [r["url"] for r in list_pending_threads(self.conn, source="zz")]
+        self.assertEqual(pending, ["http://zz"])
+        missing = list_thread_urls_with_missing_assets(self.conn, source="zz")
+        self.assertEqual(missing, ["http://zz-i"])
+
     def test_queue_missing_uses_exists_not_magic(self) -> None:
         """Corrupt-but-present file: queue scan skips; done check still retries."""
         bad = self.files / "bad.jpg"

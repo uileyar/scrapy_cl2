@@ -88,8 +88,7 @@ def _build_work_queue(
     source: str,
     lookback_days: int = RESUME_LOOKBACK_DAYS,
 ) -> list[dict]:
-    """合并列表页、近 lookback_days 天的 pending / 缺资源线程；full 优先于 patch。"""
-    del source
+    """合并列表页、同 source 且近 lookback_days 天的 pending / 缺资源；full 优先于 patch。"""
     since = resume_since_iso(lookback_days)
     by_url: dict[str, dict] = {}
     for row in list_threads:
@@ -99,7 +98,7 @@ def _build_work_queue(
             "downloads": row.get("downloads") or 0,
             "mode": "full",
         }
-    pending_rows = list_pending_threads(conn, since=since)
+    pending_rows = list_pending_threads(conn, since=since, source=source)
     for row in pending_rows:
         if row["url"] not in by_url:
             by_url[row["url"]] = {
@@ -108,13 +107,16 @@ def _build_work_queue(
                 "downloads": row.get("downloads") or 0,
                 "mode": "full",
             }
-    missing_urls = list_thread_urls_with_missing_assets(conn, since=since)
+    missing_urls = list_thread_urls_with_missing_assets(
+        conn, since=since, source=source
+    )
     patch_added = 0
     for url in missing_urls:
         if url in by_url:
             continue
         row = conn.execute(
-            "SELECT url, title, downloads FROM threads WHERE url = ?", (url,)
+            "SELECT url, title, downloads FROM threads WHERE url = ? AND source = ?",
+            (url, source),
         ).fetchone()
         if row:
             by_url[url] = {
@@ -128,8 +130,9 @@ def _build_work_queue(
     n_full = sum(1 for t in work if t["mode"] == "full")
     n_patch = sum(1 for t in work if t["mode"] == "patch")
     log.info(
-        "工作队列: list_new=%d pending(近%d天)=%d missing(近%d天)=%d "
+        "工作队列: source=%s list_new=%d pending(近%d天)=%d missing(近%d天)=%d "
         "→ queue=%d (full=%d patch=%d) since=%s",
+        source,
         len(list_threads),
         lookback_days,
         len(pending_rows),

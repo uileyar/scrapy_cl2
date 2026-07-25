@@ -156,20 +156,22 @@ def list_pending_threads(
     conn: sqlite3.Connection,
     *,
     since: Optional[str] = None,
+    source: Optional[str] = None,
 ) -> list[dict]:
     conn.row_factory = sqlite3.Row
+    clauses = ["status = 'pending'"]
+    params: list = []
+    if source is not None:
+        clauses.append("source = ?")
+        params.append(source)
     if since:
-        rows = conn.execute(
-            """
-            SELECT url, title, downloads, source, status FROM threads
-            WHERE status = 'pending' AND crawled_at >= ?
-            """,
-            (since,),
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            "SELECT url, title, downloads, source, status FROM threads WHERE status = 'pending'"
-        ).fetchall()
+        clauses.append("crawled_at >= ?")
+        params.append(since)
+    sql = (
+        "SELECT url, title, downloads, source, status FROM threads WHERE "
+        + " AND ".join(clauses)
+    )
+    rows = conn.execute(sql, params).fetchall()
     result = [dict(r) for r in rows]
     conn.row_factory = None
     return result
@@ -194,6 +196,7 @@ def list_candidate_missing_asset_rows(
     conn: sqlite3.Connection,
     *,
     since: Optional[str] = None,
+    source: Optional[str] = None,
 ) -> list[dict]:
     """SQL candidates: has URL and (path NULL/empty). File-missing-with-path checked in Python."""
     conn.row_factory = sqlite3.Row
@@ -208,10 +211,13 @@ def list_candidate_missing_asset_rows(
              AND (torrent_path IS NULL OR torrent_path = ''))
           )
     """
-    params: tuple = ()
+    params: list = []
+    if source is not None:
+        sql += " AND source = ?"
+        params.append(source)
     if since:
         sql += " AND crawled_at >= ?"
-        params = (since,)
+        params.append(since)
     rows = conn.execute(sql, params).fetchall()
     result = [dict(r) for r in rows]
     conn.row_factory = None
@@ -251,9 +257,10 @@ def list_thread_urls_with_missing_assets(
     conn: sqlite3.Connection,
     *,
     since: Optional[str] = None,
+    source: Optional[str] = None,
 ) -> list[str]:
     urls: set[str] = set()
-    for row in list_candidate_missing_asset_rows(conn, since=since):
+    for row in list_candidate_missing_asset_rows(conn, since=since, source=source):
         urls.add(row["thread_url"])
     conn.row_factory = sqlite3.Row
     sql = """
@@ -264,10 +271,13 @@ def list_thread_urls_with_missing_assets(
               AND torrent_path IS NOT NULL AND torrent_path != '')
         )
     """
-    params: tuple = ()
+    params: list = []
+    if source is not None:
+        sql += " AND source = ?"
+        params.append(source)
     if since:
         sql += " AND crawled_at >= ?"
-        params = (since,)
+        params.append(since)
     rows = conn.execute(sql, params).fetchall()
     for r in rows:
         if item_missing_for_queue(dict(r)):

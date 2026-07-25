@@ -30,7 +30,9 @@ class TestCrawlPipelineResume(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_queue_includes_pending_not_on_list(self) -> None:
-        upsert_thread(self.conn, "http://old", "Old", downloads=1, status="pending")
+        upsert_thread(
+            self.conn, "http://old", "Old", downloads=1, source="zz", status="pending"
+        )
         queue = _build_work_queue(
             conn=self.conn,
             list_threads=[],
@@ -41,8 +43,8 @@ class TestCrawlPipelineResume(unittest.TestCase):
         self.assertEqual(queue[0]["mode"], "full")
 
     def test_queue_skips_pending_older_than_lookback(self) -> None:
-        upsert_thread(self.conn, "http://fresh", "Fresh", status="pending")
-        upsert_thread(self.conn, "http://stale", "Stale", status="pending")
+        upsert_thread(self.conn, "http://fresh", "Fresh", source="zz", status="pending")
+        upsert_thread(self.conn, "http://stale", "Stale", source="zz", status="pending")
         stale_ts = (datetime.now(timezone.utc) - timedelta(days=10)).isoformat()
         self.conn.execute(
             "UPDATE threads SET crawled_at = ? WHERE url = ?",
@@ -54,8 +56,25 @@ class TestCrawlPipelineResume(unittest.TestCase):
         self.assertIn("http://fresh", urls)
         self.assertNotIn("http://stale", urls)
 
+    def test_queue_only_same_source(self) -> None:
+        upsert_thread(self.conn, "http://zz-p", "Z", source="zz", status="pending")
+        upsert_thread(self.conn, "http://ym-p", "Y", source="ym", status="pending")
+        upsert_thread(self.conn, "http://zz-m", "ZM", source="zz", status="done")
+        upsert_thread(self.conn, "http://ym-m", "YM", source="ym", status="done")
+        upsert_item(
+            self.conn, "http://zz-m", "C1",
+            img_url="http://img/z.jpg", img_path=None, source="zz",
+        )
+        upsert_item(
+            self.conn, "http://ym-m", "C2",
+            img_url="http://img/y.jpg", img_path=None, source="ym",
+        )
+        queue = _build_work_queue(conn=self.conn, list_threads=[], source="zz")
+        urls = {t["url"] for t in queue}
+        self.assertEqual(urls, {"http://zz-p", "http://zz-m"})
+
     def test_queue_patch_for_done_missing_img(self) -> None:
-        upsert_thread(self.conn, "http://t", "T", status="done")
+        upsert_thread(self.conn, "http://t", "T", source="zz", status="done")
         upsert_item(
             self.conn,
             "http://t",
@@ -65,6 +84,7 @@ class TestCrawlPipelineResume(unittest.TestCase):
             img_path=None,
             torrent_url=None,
             torrent_path=None,
+            source="zz",
         )
         queue = _build_work_queue(conn=self.conn, list_threads=[], source="zz")
         self.assertEqual(queue[0]["mode"], "patch")
