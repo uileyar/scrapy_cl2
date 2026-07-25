@@ -105,7 +105,7 @@ class TestCrawlPipelineResume(unittest.TestCase):
             image_download.assert_called_once()
             self.assertEqual(
                 image_download.call_args.kwargs.get("referer"),
-                "https://www.t66y.com/",
+                "http://t/",
             )
             torrent_download.assert_not_called()
         self.assertTrue(thread_assets_complete(self.conn, "http://t"))

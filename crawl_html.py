@@ -12,6 +12,7 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlparse
 
 from crawl_to_sqlite import (
     RESUME_LOOKBACK_DAYS,
@@ -142,11 +143,23 @@ def _build_work_queue(
     return work
 
 
+def _referer_from_page_url(page_url: str | None) -> str | None:
+    """从详情页/帖子 URL 取 scheme://host/ 作为图片 Referer。"""
+    if not page_url:
+        return None
+    parsed = urlparse(page_url.strip())
+    if not parsed.scheme or not parsed.netloc:
+        return None
+    return f"{parsed.scheme}://{parsed.netloc}/"
+
+
 def _ensure_image(
     img_url: str | None,
     img_path_db: str | None,
     save_dir: Path,
     safe_name: str,
+    *,
+    page_url: str | None = None,
 ) -> str | None:
     if not img_url:
         return img_path_db if is_valid_image_file(img_path_db or "") else None
@@ -172,7 +185,7 @@ def _ensure_image(
                 img_url,
                 save_dir,
                 filename=safe_name,
-                referer="https://www.t66y.com/",
+                referer=_referer_from_page_url(page_url),
             )
         )
     except Exception as exc:
@@ -248,6 +261,7 @@ def _process_thread_full(
             prior.get("img_path"),
             save_dir,
             safe_name,
+            page_url=detail_url,
         )
         torrent_path = _ensure_torrent(
             item.get("torrent_url"), prior.get("torrent_path"), save_dir, safe_name
@@ -308,6 +322,7 @@ def _process_thread_patch(
                 img_path,
                 save_dir,
                 safe_name,
+                page_url=thread_url,
             )
         if item.get("torrent_url") and not is_valid_torrent_file(torrent_path or ""):
             torrent_path = _ensure_torrent(
