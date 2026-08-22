@@ -7,6 +7,7 @@ from __future__ import annotations
 import html
 import json
 import re
+from html.entities import name2codepoint
 from html.parser import HTMLParser
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
@@ -16,7 +17,7 @@ from actress_extract import extract_actress
 
 # 封面候选：排除广告 GIF/广告域，优先图床与 /upload/files/
 _AD_HOST_MARKERS = ("avspda.xyz", "51688.cc")
-_POSTER_HOSTS = ("picdcd.com", "odjsk.com", "gdvdvb.com", "adipcd.com")
+_POSTER_HOSTS = ("picdcd.com", "odjsk.com", "gdvdvb.com", "adipcd.com", "pkapic.cc")
 _POSTER_EXTS = (".jpg", ".jpeg", ".png", ".webp")
 
 VOID_TAGS = frozenset(
@@ -198,8 +199,24 @@ def extract_conttpc_html(html: str) -> str:
     return html[start:i]
 
 
+_MAGNET_RE = re.compile(r"magnet:\?[^\s\"'<>]+", re.I)
+
+
+def seed_url_from_anchor(href: str, text: str = "") -> Optional[str]:
+    """从种子 ``<a>`` 取出 rmdown 页或 magnet URI（优先锚文本）。"""
+    href = (href or "").strip()
+    text = (text or "").strip()
+    if href and "rmdown.com" in href.lower():
+        return href
+    for candidate in (text, href):
+        m = _MAGNET_RE.search(candidate)
+        if m:
+            return m.group(0)
+    return None
+
+
 class ConttpcWalkParser(HTMLParser):
-    """遍历第一个 ``#conttpc``：文本（br→换行）、img URL、rmdown 链接顺序。"""
+    """遍历第一个 ``#conttpc``：文本（br→换行）、img URL、种子链接顺序。"""
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=False)
@@ -208,6 +225,17 @@ class ConttpcWalkParser(HTMLParser):
         self.plain_chunks: List[str] = []
         self.img_urls: List[str] = []
         self.rmdown_hrefs: List[str] = []
+        self._a_href: Optional[str] = None
+        self._a_text: List[str] = []
+
+    def _flush_anchor(self) -> None:
+        if self._a_href is None:
+            return
+        seed = seed_url_from_anchor(self._a_href, "".join(self._a_text))
+        if seed:
+            self.rmdown_hrefs.append(seed)
+        self._a_href = None
+        self._a_text = []
 
     def handle_starttag(self, tag: str, attrs: List[Tuple[str, str]]) -> None:
         ad = dict(attrs)
@@ -226,23 +254,46 @@ class ConttpcWalkParser(HTMLParser):
             if url and "adblo_ck" not in url and not url.endswith("adblo_ck.jpg"):
                 self.img_urls.append(url)
         elif tag == "a":
-            href = (ad.get("href") or "").strip()
-            if href and "rmdown.com" in href:
-                self.rmdown_hrefs.append(href)
+            self._flush_anchor()
+            self._a_href = (ad.get("href") or "").strip()
+            self._a_text = []
 
     def handle_endtag(self, tag: str) -> None:
         if not self._active:
             return
+        if tag == "a":
+            self._flush_anchor()
         if tag not in VOID_TAGS:
             self._depth -= 1
         if self._depth <= 0:
+            self._flush_anchor()
             self._active = False
 
-    def handle_data(self, data: str) -> None:
+    def _append_text(self, data: str) -> None:
         if self._active:
             self.plain_chunks.append(data)
+            if self._a_href is not None:
+                self._a_text.append(data)
+
+    def handle_data(self, data: str) -> None:
+        self._append_text(data)
+
+    def handle_entityref(self, name: str) -> None:
+        # magnet 的 ``&dn=`` 无分号，不能当实体丢掉
+        if name in name2codepoint:
+            self._append_text(chr(name2codepoint[name]))
+        else:
+            self._append_text(f"&{name}")
+
+    def handle_charref(self, name: str) -> None:
+        try:
+            cp = int(name[1:], 16) if name[:1].lower() == "x" else int(name)
+            self._append_text(chr(cp))
+        except (ValueError, OverflowError):
+            self._append_text(f"&#{name};")
 
     def close(self) -> None:  # noqa: A003
+        self._flush_anchor()
         super().close()
 
 
@@ -329,16 +380,70 @@ def _parse_series_block_text(block: str) -> Optional[Dict[str, Any]]:
     )
     if not m:
         m = re.search(r"(?m)^\d*([A-Z]{2,}-?\d{2,})\s+(.+)$", block, re.DOTALL)
-    if not m:
+    if m:
+        code, title_line = _normalize_code(m.group(1)), m.group(2).strip()
+        title_line = re.sub(r"\s+", " ", title_line)
+        actress_m = re.search(
+            r"【(?:演出|出演)女[優优]】[︰：:]([^【\n]+)", block
+        )
+        actress = actress_m.group(1).strip() if actress_m else None
+        if actress == "----":
+            actress = None
+        size_m = re.search(r"【影片大小】[︰：:]\s*([\d.]+)\s*GB?", block, re.I)
+        size_gb = size_m.group(1) if size_m else None
+        return {
+            "code": code,
+            "title": title_line,
+            "actress": actress,
+            "size_gb": size_gb,
+        }
+    return _parse_anthology_block_text(block)
+
+
+def _parse_anthology_block_text(block: str) -> Optional[Dict[str, Any]]:
+    """合集块：``[高清中字]ABW-177C 中文标题`` + 【原文片名】/【影片大小】。"""
+    block = block.strip()
+    if not block:
         return None
-    code, title_line = _normalize_code(m.group(1)), m.group(2).strip()
-    title_line = re.sub(r"\s+", " ", title_line)
+    if "【原文片名】" not in block and "【影片大小】" not in block:
+        return None
+
+    first = block.split("\n", 1)[0].strip()
+    cm = CODE_RE.search(first) or CODE_RE.search(block)
+    if not cm:
+        return None
+    code = _normalize_code(cm.group(1))
+
+    title_line = ""
+    cm_first = CODE_RE.search(first)
+    if cm_first:
+        title_line = first[cm_first.end() :].strip()
+    if not title_line:
+        om = re.search(r"【原文片名】[︰：:]\s*(.+)", block)
+        if om:
+            rest = om.group(1).strip()
+            cm2 = CODE_RE.search(rest)
+            title_line = rest[cm2.end() :].strip() if cm2 else rest
+
+    title_line = re.sub(r"\s+", " ", title_line).strip() or None
+    size_m = re.search(r"【影片大小】[︰：:]\s*([\d.]+)\s*GB?", block, re.I)
+    size_gb = size_m.group(1) if size_m else None
     actress_m = re.search(r"【(?:演出|出演)女[優优]】[︰：:]([^【\n]+)", block)
     actress = actress_m.group(1).strip() if actress_m else None
     if actress == "----":
         actress = None
-    size_m = re.search(r"【影片大小】[︰：:]\s*([\d.]+)\s*GB?", block, re.I)
-    size_gb = size_m.group(1) if size_m else None
+    if not actress:
+        # 优先日文原文片名尾部女优；其次【影片名称代号】；再退回中文标题行
+        om = re.search(r"【原文片名】[︰：:]\s*(.+)", block)
+        orig = om.group(1).strip() if om else ""
+        if not orig:
+            nm = re.search(r"【影片名称代号】[︰：:]\s*(.+)", block)
+            orig = nm.group(1).strip() if nm else ""
+        actress = extract_actress("", orig) if orig else None
+        if not actress and title_line:
+            # title_line 常无番号；extract_actress 的 h4_tail 路径依赖 CODE
+            probe = f"{code} {title_line}" if code else title_line
+            actress = extract_actress("", probe)
     return {
         "code": code,
         "title": title_line,
@@ -391,13 +496,12 @@ def _img_from_html_segment(seg_html: str) -> Optional[str]:
 
 
 def _torrent_from_html_segment(seg_html: str) -> Optional[str]:
-    for m in re.finditer(
-        r'href\s*=\s*["\']([^"\']*rmdown\.com[^"\']*)["\']',
-        seg_html,
-        re.I,
-    ):
-        return m.group(1).strip()
-    return None
+    for m in re.finditer(r'href\s*=\s*["\']([^"\']+)["\']', seg_html, re.I):
+        seed = seed_url_from_anchor(m.group(1).strip(), "")
+        if seed:
+            return seed
+    mag = _MAGNET_RE.search(seg_html)
+    return mag.group(0) if mag else None
 
 
 def parse_detail_series(
@@ -437,6 +541,47 @@ def parse_detail_series(
                     it["torrent_url"] = rmdown_hrefs[i]
         return {
             "style": "series_multi_header",
+            "torrent_mode": torrent_mode,
+            "items": items,
+            "errors": errors,
+        }
+
+    # 合集：【原文片名】或 ==== 分隔的「[高清中字]番号C 标题」块
+    orig_markers = len(re.findall(r"【原文片名】[︰：:]", plain))
+    if orig_markers >= 2 or len(re.findall(r"\n={5,}\s*\n", plain)) >= 1:
+        body_plain = plain
+        blocks_text = [
+            b.strip()
+            for b in re.split(r"\n={5,}\s*\n", body_plain)
+            if b.strip()
+        ]
+        parsed_blocks = []
+        for b in blocks_text:
+            pb = _parse_anthology_block_text(b) or _parse_series_block_text(b)
+            if pb:
+                parsed_blocks.append(pb)
+        torrent_mode = "one_torrent" if len(rmdown_hrefs) <= 1 else "multi_torrent"
+        poster_urls = [u for u in img_urls if _is_poster_candidate(u)]
+        items = []
+        for i, pb in enumerate(parsed_blocks):
+            it = dict(pb)
+            if i < len(poster_urls):
+                it["poster_url"] = poster_urls[i]
+            else:
+                it["poster_url"] = None
+            if torrent_mode == "one_torrent" and rmdown_hrefs:
+                it["torrent_url"] = rmdown_hrefs[0]
+            elif torrent_mode == "multi_torrent" and i < len(rmdown_hrefs):
+                it["torrent_url"] = rmdown_hrefs[i]
+            else:
+                it["torrent_url"] = None
+            items.append(it)
+        if len(parsed_blocks) != len(poster_urls) and parsed_blocks:
+            errors.append(
+                f"img_count_mismatch blocks={len(parsed_blocks)} imgs={len(poster_urls)}"
+            )
+        return {
+            "style": "series_anthology",
             "torrent_mode": torrent_mode,
             "items": items,
             "errors": errors,

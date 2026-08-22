@@ -138,9 +138,19 @@ _PURE_KANA_RE = re.compile(r"^[\u3040-\u309f\u30a0-\u30ffー・]+$")
 
 
 def _strip_leading_bracket_tags(text: str) -> str:
-    """去掉标题前连续 [有碼] [HD/xG] 等方括号标签。"""
+    """去掉标题**前**连续 [有碼] / 【重大发表】 等标签；保留文中【角色・名】。"""
     t = text.strip()
-    return re.sub(r"(?:\[[^\]]*\]\s*)+", "", t).strip()
+    while True:
+        m = re.match(r"\[[^\]]*\]\s*", t)
+        if m:
+            t = t[m.end() :]
+            continue
+        m = re.match(r"【([^】]*)】\s*", t)
+        if m and "・" not in (m.group(1) or ""):
+            t = t[m.end() :]
+            continue
+        break
+    return t.strip()
 
 
 def _is_single_hanzi_tail_name(tok: str) -> bool:
@@ -493,14 +503,16 @@ def _actress_from_trailing_bracket(text: str) -> Optional[str]:
     修复点：旧版 `_actress_guess_from_title_tail` 里
     `head = re.split(r"[\\[【]", text, maxsplit=1)[0]` 会把第一个方括号之后的
     内容整段丢弃——只要标题不是「・」角色格，这类最常见的纯方括号艺名格式就会
-    被直接切掉，等于系统性漏检。这里单独检查所有方括号里的候选，取最后一个
-    校验通过的当女优名。
+    被直接切掉，等于系统性漏检。
+
+    仅认真正「尾部」方括号：忽略开头的【重大发表】等标签，避免误当艺名。
     """
-    matches = _TRAILING_BRACKET_RE.findall(text)
+    t = re.sub(r"(?:\s*\[[^\]]*\])+$", "", text.strip()).strip()
+    matches = [m for m in _TRAILING_BRACKET_RE.finditer(t) if m.end() == len(t)]
     if not matches:
         return None
-    for cand in reversed(matches):
-        cand = _clean_actress_token(cand)
+    for m in reversed(matches):
+        cand = _clean_actress_token(m.group(1))
         if "・" in cand:
             cand = _clean_actress_token(cand.split("・")[-1])
         if not cand or len(cand) > 12:

@@ -20,6 +20,29 @@ _tl_last_ts: float = 0.0
 _TL_MIN_GAP_S = 0.22
 
 
+def _looks_like_translate_error(zh: str) -> bool:
+    """识别谷歌翻译返回的 500/限流错误页，避免当作成译文。"""
+    compact = (
+        (zh or "")
+        .lower()
+        .replace("\u2019", "'")
+        .replace("\u2018", "'")
+        .replace("\xa0", " ")
+    )
+    markers = (
+        "error 500",
+        "error 429",
+        "error 503",
+        "server error",
+        "that's an error",
+        "there was an error",
+        "please try again later",
+        "that's all we know",
+        "!!1500",
+    )
+    return any(m in compact for m in markers)
+
+
 def _mostly_chinese_title(s: str) -> bool:
     """汉字（CJK 统一表意文字）占比超过 60%（不含正好 60%）视为已是中文，不再翻译。"""
     t = s.strip()
@@ -68,6 +91,8 @@ def translate_title_to_zh(title: str) -> str:
                 time.sleep(_TL_MIN_GAP_S - gap)
             zh = (tl.translate(t) or "").strip()
             _tl_last_ts = time.monotonic()
+            if _looks_like_translate_error(zh):
+                zh = ""
             if zh:
                 _memo_put_zh(t, zh)
                 print(f"translate_title_to_zh: {t} -> {zh}")

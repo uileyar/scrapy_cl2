@@ -119,6 +119,7 @@ _HOST_REPLACE: dict[str, str] = {
     "picdcd.com": "odjsk.com",
     "gdvdvb.com": "odjsk.com",
     "adipcd.com": "odjsk.com",
+    "pkapic.cc": "odjsk.com",
 }
 
 

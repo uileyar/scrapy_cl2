@@ -4,8 +4,9 @@
 对外入口：download_from_rmdown_url
 
 使用 curl_cffi 模拟 Chrome TLS/HTTP2 指纹以绕过 Cloudflare；
-代理：参数 proxy > 环境变量 > 默认 Clash 7897；失败可回退直连。
+代理：参数 proxy > 环境变量 > 默认直连；失败可回退直连。
 页面与下载共用 Session（自动维持 Cookie）。
+超时默认 15 秒。
 """
 from __future__ import annotations
 
@@ -24,12 +25,10 @@ log = logging.getLogger(__name__)
 try:
     from curl_cffi import requests as cffi_requests
 except ImportError as e:  # pragma: no cover
-    raise ImportError(
-        "需要安装 curl_cffi：pip install curl_cffi"
-    ) from e
+    raise ImportError("需要安装 curl_cffi：pip install curl_cffi") from e
 
-# Clash Verge 默认代理；设环境变量 RMDOWN_PROXY=direct 可强制直连
-_DEFAULT_PROXY = "http://127.0.0.1:7897"
+# 默认直连；设环境变量 RMDOWN_PROXY=http://127.0.0.1:7897 可启用代理
+_DEFAULT_PROXY = None
 _DIRECT_SENTINELS = frozenset({"", "direct", "none", "off", "0"})
 
 # curl_cffi 会按此生成匹配的 UA / TLS 指纹；勿再手动覆盖 User-Agent
@@ -105,7 +104,7 @@ def resolve_proxy(proxy: str | None = None) -> Optional[str]:
     return _DEFAULT_PROXY
 
 
-def build_session(proxy: str | None = None, *, timeout: int = 60) -> Any:
+def build_session(proxy: str | None = None, *, timeout: int = 15) -> Any:
     """
     构建 curl_cffi Session（Chrome 指纹 + Cookie）。
 
@@ -141,13 +140,26 @@ def _safe_torrent_name(stem: str) -> str:
 
 def _looks_like_cf_challenge(body: bytes | str) -> bool:
     """识别 Cloudflare 人机验证页（Just a moment...）。"""
-    text = body.decode("utf-8", errors="replace") if isinstance(body, (bytes, bytearray)) else body
+    text = (
+        body.decode("utf-8", errors="replace")
+        if isinstance(body, (bytes, bytearray))
+        else body
+    )
     low = text.lower()
     return (
         "just a moment" in low
         or "cf-mitigated" in low
         or "cf-browser-verification" in low
         or "challenges.cloudflare.com" in low
+    )
+
+
+def _is_cf_challenge_error(err: BaseException) -> bool:
+    """Cloudflare 人机验证：重试/换直连都过不了，应立即失败。"""
+    msg = str(err)
+    low = msg.lower()
+    return "cloudflare" in low and (
+        "人机验证" in msg or "just a moment" in low or "人机验证页" in msg
     )
 
 
@@ -241,7 +253,7 @@ def download_torrent(
     override_name: str | None = None,
     session: Any | None = None,
     proxy: str | None = None,
-    timeout: int = 60,
+    timeout: int = 15,
 ) -> Path:
     """
     下载种子文件到目录。
@@ -273,7 +285,9 @@ def download_torrent(
             raise RuntimeError("download.php 返回 Cloudflare 人机验证页，不是种子文件")
         if not data.startswith(b"d") and b"announce" not in data[:200]:
             # 非严格校验：多数 .torrent 以 bencode dict 'd' 开头
-            log.warning("下载内容可能不是 torrent（未以 bencode dict 开头），仍写入文件")
+            log.warning(
+                "下载内容可能不是 torrent（未以 bencode dict 开头），仍写入文件"
+            )
         cd = resp.headers.get("Content-Disposition")
         name = _filename_from_disposition(cd)
     finally:
@@ -350,7 +364,7 @@ def download_from_rmdown_url(
     retries: int = 3,
     proxy: str | None = None,
     fallback_direct: bool = True,
-    timeout: int = 60,
+    timeout: int = 15,
 ) -> Path:
     """
     打开 rmdown 资源页（如 link.php?hash=...），解析隐藏表单字段并下载种子。
@@ -362,9 +376,9 @@ def download_from_rmdown_url(
         download_base: download.php 的 URL（不含查询串）
         session_headers: 附加请求头（拉取页面与下载种子时都会合并）
         retries: 最大重试次数（含首次请求）
-        proxy: 代理地址；None 走环境变量/默认 7897；``direct`` 强制直连
+        proxy: 代理地址；None 走环境变量/默认直连；``direct`` 强制直连
         fallback_direct: 代理失败时是否回退直连（同一次 attempt 内）
-        timeout: 单次 HTTP 超时秒数
+        timeout: 单次 HTTP 超时秒数（默认 15）
 
     返回:
         已写入文件的绝对路径（pathlib.Path）
@@ -403,6 +417,9 @@ def download_from_rmdown_url(
                 return saved.resolve()
             except Exception as e:
                 last_err = e
+                if _is_cf_challenge_error(e):
+                    log.error("种子下载失败（Cloudflare 人机验证，不再重试）: %s", e)
+                    raise
                 can_fallback = (
                     mode_proxy is not None
                     and fallback_direct
@@ -436,7 +453,9 @@ def download_from_rmdown_url(
 
 def main() -> None:
     """命令行入口。"""
-    parser = argparse.ArgumentParser(description="从 rmdown 资源页下载种子（curl_cffi）")
+    parser = argparse.ArgumentParser(
+        description="从 rmdown 资源页下载种子（curl_cffi）"
+    )
     parser.add_argument("page_url", help="资源页 URL")
     parser.add_argument("out_dir", help="保存目录")
     parser.add_argument(

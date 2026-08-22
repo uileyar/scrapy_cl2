@@ -8,6 +8,8 @@ from __future__ import annotations
 import argparse
 import logging
 import re
+import socket
+import subprocess
 import sys
 import time
 from datetime import datetime
@@ -18,6 +20,7 @@ from actress_extract import configure_actress_dict
 from crawl_to_sqlite import (
     RESUME_LOOKBACK_DAYS,
     ensure_db,
+    is_magnet_url,
     item_needs_asset_retry,
     item_needs_detail_reparse,
     list_items_for_thread,
@@ -48,6 +51,55 @@ SOURCE_URL_MAP: dict[str, str] = {
     "zz": "https://www.t66y.com/thread0806.php?fid=26",
     "ym": "https://www.t66y.com/thread0806.php?fid=15",
 }
+
+# ── 代理自启 ──────────────────────────────────────────────
+CLASH_VERGE_EXE = r"C:\Program Files\Clash Verge\clash-verge.exe"
+PROXY_HOST = "127.0.0.1"
+PROXY_PORT = 7897
+
+
+def _is_proxy_alive(port: int = PROXY_PORT, host: str = PROXY_HOST) -> bool:
+    """检查代理端口是否可连。"""
+    try:
+        with socket.create_connection((host, port), timeout=2):
+            return True
+    except (ConnectionRefusedError, OSError):
+        return False
+
+
+def ensure_proxy(timeout: int = 30) -> bool:
+    """确保 Clash 代理已启动；如未运行则拉起并等待端口就绪。"""
+    if _is_proxy_alive():
+        log.info("代理已在运行 (%s:%d)", PROXY_HOST, PROXY_PORT)
+        return True
+
+    log.info("代理未运行，尝试启动 Clash Verge …")
+    try:
+        # DETACHED_PROCESS: 子进程独立于父进程，爬虫退出后 Clash 继续运行
+        # CREATE_NO_WINDOW: 不弹出新窗口
+        creationflags = 0
+        if sys.platform == "win32":
+            creationflags = (
+                getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+                | getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+            )
+        subprocess.Popen([CLASH_VERGE_EXE], creationflags=creationflags)
+    except FileNotFoundError:
+        log.error("Clash Verge 未找到: %s", CLASH_VERGE_EXE)
+        return False
+    except Exception as e:
+        log.error("启动 Clash Verge 失败: %s", e)
+        return False
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if _is_proxy_alive():
+            log.info("Clash Verge 已启动，代理端口就绪 (%s:%d)", PROXY_HOST, PROXY_PORT)
+            return True
+        time.sleep(1)
+
+    log.error("等待代理端口就绪超时（%ds），后续请求可能失败", timeout)
+    return False
 
 
 URL_SOURCE_MAP: dict[str, str] = {v: k for k, v in SOURCE_URL_MAP.items()}
@@ -213,6 +265,8 @@ def _ensure_torrent(
 ) -> str | None:
     if not torrent_url:
         return torrent_path_db if is_valid_torrent_file(torrent_path_db or "") else None
+    if is_magnet_url(torrent_url):
+        return None
     existing = resolve_asset_path(
         db_path=torrent_path_db, save_dir=save_dir, stem=safe_name, kind="torrent"
     )
@@ -337,7 +391,11 @@ def _process_thread_patch(
                 safe_name,
                 page_url=thread_url,
             )
-        if item.get("torrent_url") and not is_valid_torrent_file(torrent_path or ""):
+        if (
+            item.get("torrent_url")
+            and not is_magnet_url(item.get("torrent_url"))
+            and not is_valid_torrent_file(torrent_path or "")
+        ):
             torrent_path = _ensure_torrent(
                 item["torrent_url"], torrent_path, save_dir, safe_name
             )
@@ -469,6 +527,10 @@ def _setup_logging(log_dir: Path) -> Path:
     file_handler.setLevel(logging.DEBUG)
     file_handler.setFormatter(fmt)
 
+    # 强制 line-buffering：WSL2 跨文件系统调用 Windows Python 时，
+    # stdout 管道可能因块缓冲导致 exec 提前截断输出 → agent 误报 SIGKILL
+    sys.stdout.reconfigure(line_buffering=True)  # type: ignore[attr-defined]
+
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(logging.INFO)
     console_handler.setFormatter(fmt)
@@ -530,6 +592,9 @@ def main() -> int:
     log_file = _setup_logging(Path(args.log_dir))
 
     log.info("日志文件: %s", log_file)
+
+    # 启动前确保 Clash 代理在线，未运行则自动拉起
+    ensure_proxy()
 
     if args.url:
         source = resolve_source(args.url)

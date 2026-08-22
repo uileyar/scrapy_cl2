@@ -397,6 +397,8 @@ def list_candidate_missing_asset_rows(
             (img_url IS NOT NULL AND img_url != '' AND (img_path IS NULL OR img_path = ''))
             OR
             (torrent_url IS NOT NULL AND torrent_url != ''
+             AND torrent_url NOT LIKE 'magnet:%'
+             AND torrent_url NOT LIKE '%magnet:?%'
              AND (torrent_path IS NULL OR torrent_path = ''))
           )
     """
@@ -413,10 +415,17 @@ def list_candidate_missing_asset_rows(
     return result
 
 
+def is_magnet_url(url: str | None) -> bool:
+    """磁力链本身即为资源，无需再下 .torrent。"""
+    u = (url or "").strip().lower()
+    return u.startswith("magnet:") or "magnet:?" in u
+
+
 def item_needs_asset_retry(item: dict) -> bool:
     """下载完成判定：必须有种子 URL，且已有 URL 的资源文件通过内容校验。
 
     种子 URL 为空时也算未完成——楼主晚编辑补链时，若标成 done 就永远不会重解析。
+    magnet: 链接只保存 URI，不算缺文件。
     """
     img_url = (item.get("img_url") or "").strip()
     tor_url = (item.get("torrent_url") or "").strip()
@@ -424,6 +433,8 @@ def item_needs_asset_retry(item: dict) -> bool:
         return True
     if img_url and not is_valid_image_file(item.get("img_path") or ""):
         return True
+    if is_magnet_url(tor_url):
+        return False
     if not is_valid_torrent_file(item.get("torrent_path") or ""):
         return True
     return False
@@ -437,6 +448,8 @@ def item_missing_for_queue(item: dict) -> bool:
         return True
     if img_url and not asset_path_on_disk(item.get("img_path")):
         return True
+    if is_magnet_url(tor_url):
+        return False
     if not asset_path_on_disk(item.get("torrent_path")):
         return True
     return False

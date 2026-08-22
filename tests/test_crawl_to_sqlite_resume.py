@@ -7,6 +7,7 @@ from pathlib import Path
 
 from crawl_to_sqlite import (
     ensure_db,
+    is_magnet_url,
     item_missing_for_queue,
     item_needs_asset_retry,
     list_candidate_missing_asset_rows,
@@ -124,6 +125,24 @@ class TestCrawlToSqliteResume(unittest.TestCase):
         self.assertEqual(pending, ["http://zz"])
         missing = list_thread_urls_with_missing_assets(self.conn, source="zz")
         self.assertEqual(missing, ["http://zz-i"])
+
+    def test_magnet_url_complete_without_torrent_file(self) -> None:
+        mag = (
+            "magnet:?xt=urn:btih:9C9954F1B14117D967A5A547BC5D23EC3BF63D48"
+            "&dn=kks11.cc@ADN-385C"
+        )
+        self.assertTrue(is_magnet_url(mag))
+        upsert_thread(self.conn, "http://t", "T", status="pending")
+        upsert_item(
+            self.conn, "http://t", "ADN-385",
+            torrent_url=mag, torrent_path=None,
+        )
+        item = list_items_for_thread(self.conn, "http://t")[0]
+        self.assertFalse(item_needs_asset_retry(item))
+        self.assertFalse(item_missing_for_queue(item))
+        self.assertTrue(thread_assets_complete(self.conn, "http://t"))
+        self.assertEqual(list_candidate_missing_asset_rows(self.conn), [])
+        self.assertEqual(list_thread_urls_with_missing_assets(self.conn), [])
 
     def test_queue_missing_uses_exists_not_magic(self) -> None:
         """Corrupt-but-present file: queue scan skips; done check still retries."""

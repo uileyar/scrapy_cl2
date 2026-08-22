@@ -13,7 +13,7 @@ from crawl_to_sqlite import (
     upsert_item,
     upsert_thread,
 )
-from crawl_html import _build_work_queue, _process_thread_patch
+from crawl_html import _build_work_queue, _ensure_torrent, _process_thread_patch
 
 
 class TestCrawlPipelineResume(unittest.TestCase):
@@ -62,12 +62,20 @@ class TestCrawlPipelineResume(unittest.TestCase):
         upsert_thread(self.conn, "http://zz-m", "ZM", source="zz", status="done")
         upsert_thread(self.conn, "http://ym-m", "YM", source="ym", status="done")
         upsert_item(
-            self.conn, "http://zz-m", "C1",
-            img_url="http://img/z.jpg", img_path=None, source="zz",
+            self.conn,
+            "http://zz-m",
+            "C1",
+            img_url="http://img/z.jpg",
+            img_path=None,
+            source="zz",
         )
         upsert_item(
-            self.conn, "http://ym-m", "C2",
-            img_url="http://img/y.jpg", img_path=None, source="ym",
+            self.conn,
+            "http://ym-m",
+            "C2",
+            img_url="http://img/y.jpg",
+            img_path=None,
+            source="ym",
         )
         queue = _build_work_queue(conn=self.conn, list_threads=[], source="zz")
         urls = {t["url"] for t in queue}
@@ -114,14 +122,16 @@ class TestCrawlPipelineResume(unittest.TestCase):
         upsert_thread(self.conn, "http://t", "T", status="pending")
         with mock.patch(
             "crawl_html.fetch_and_parse_detail",
-            return_value=[{
-                "code": "C1",
-                "code_title": "C1 Title",
-                "actress": None,
-                "size_gb": "3.0",
-                "img_url": None,
-                "torrent_url": None,
-            }],
+            return_value=[
+                {
+                    "code": "C1",
+                    "code_title": "C1 Title",
+                    "actress": None,
+                    "size_gb": "3.0",
+                    "img_url": None,
+                    "torrent_url": None,
+                }
+            ],
         ), mock.patch("crawl_html.translate_code_title", return_value=None):
             from crawl_html import _process_thread_full
 
@@ -160,8 +170,11 @@ class TestCrawlPipelineResume(unittest.TestCase):
             path.write_bytes(b"\xff\xd8\xff\xe0" + b"\x00" * 20)
             return path.resolve()
 
-        with mock.patch("crawl_html.download_image_from_url", side_effect=fake_img) as image_download, \
-             mock.patch("crawl_html.download_from_rmdown_url") as torrent_download:
+        with mock.patch(
+            "crawl_html.download_image_from_url", side_effect=fake_img
+        ) as image_download, mock.patch(
+            "crawl_html.download_from_rmdown_url"
+        ) as torrent_download:
             _process_thread_patch(
                 conn=self.conn,
                 thread_url="http://t",
@@ -187,16 +200,23 @@ class TestCrawlPipelineResume(unittest.TestCase):
         def boom(*args, **kwargs):
             raise RuntimeError("rmdown down")
 
-        with mock.patch("crawl_html.fetch_and_parse_detail", return_value=[{
-                "code": "C1",
-                "code_title": "C1 Title",
-                "actress": None,
-                "size_gb": "3.0",
-                "img_url": None,
-                "torrent_url": "http://rm/1",
-            }]), \
-             mock.patch("crawl_html.download_from_rmdown_url", side_effect=boom), \
-             mock.patch("crawl_html.translate_code_title", return_value=None):
+        with mock.patch(
+            "crawl_html.fetch_and_parse_detail",
+            return_value=[
+                {
+                    "code": "C1",
+                    "code_title": "C1 Title",
+                    "actress": None,
+                    "size_gb": "3.0",
+                    "img_url": None,
+                    "torrent_url": "http://rm/1",
+                }
+            ],
+        ), mock.patch(
+            "crawl_html.download_from_rmdown_url", side_effect=boom
+        ), mock.patch(
+            "crawl_html.translate_code_title", return_value=None
+        ):
             from crawl_html import _process_thread_full
 
             _process_thread_full(
@@ -235,9 +255,13 @@ class TestCrawlPipelineResume(unittest.TestCase):
             },
         ]
 
-        with mock.patch("crawl_html.fetch_and_parse_detail", return_value=parsed_items), \
-             mock.patch("crawl_html.download_image_from_url") as image_download, \
-             mock.patch("crawl_html.download_from_rmdown_url") as torrent_download:
+        with mock.patch(
+            "crawl_html.fetch_and_parse_detail", return_value=parsed_items
+        ), mock.patch(
+            "crawl_html.download_image_from_url"
+        ) as image_download, mock.patch(
+            "crawl_html.download_from_rmdown_url"
+        ) as torrent_download:
             from crawl_html import _process_thread_full
 
             _process_thread_full(
@@ -282,10 +306,15 @@ class TestCrawlPipelineResume(unittest.TestCase):
             path.write_bytes(b"d4:infod4:name4:testee")
             return path.resolve()
 
-        with mock.patch("crawl_html.fetch_and_parse_detail", return_value=parsed_items), \
-             mock.patch("crawl_html.download_image_from_url") as image_download, \
-             mock.patch("crawl_html.download_from_rmdown_url", side_effect=fake_torrent) as torrent_download, \
-             mock.patch("crawl_html.translate_code_title", return_value=None):
+        with mock.patch(
+            "crawl_html.fetch_and_parse_detail", return_value=parsed_items
+        ), mock.patch(
+            "crawl_html.download_image_from_url"
+        ) as image_download, mock.patch(
+            "crawl_html.download_from_rmdown_url", side_effect=fake_torrent
+        ) as torrent_download, mock.patch(
+            "crawl_html.translate_code_title", return_value=None
+        ):
             from crawl_html import _process_thread_full
 
             _process_thread_full(
@@ -395,3 +424,13 @@ class TestCrawlPipelineResume(unittest.TestCase):
         new_path = Path(items[0]["torrent_path"])
         self.assertTrue(new_path.is_file())
         self.assertEqual(new_path.parent.resolve(), new_dir.resolve())
+
+    def test_magnet_url_skips_rmdown_download(self) -> None:
+        mag = (
+            "magnet:?xt=urn:btih:9C9954F1B14117D967A5A547BC5D23EC3BF63D48"
+            "&dn=kks11.cc@ADN-385C"
+        )
+        with mock.patch("crawl_html.download_from_rmdown_url") as torrent_download:
+            path = _ensure_torrent(mag, None, self.dl, "ADN-385")
+            torrent_download.assert_not_called()
+        self.assertIsNone(path)
