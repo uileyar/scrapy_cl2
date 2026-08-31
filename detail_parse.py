@@ -409,14 +409,27 @@ def _parse_anthology_block_text(block: str) -> Optional[Dict[str, Any]]:
         return None
 
     first = block.split("\n", 1)[0].strip()
-    cm = CODE_RE.search(first) or CODE_RE.search(block)
-    if not cm:
-        return None
-    code = _normalize_code(cm.group(1))
-
+    code = None
     title_line = ""
+    # 字段内番号优先：允许 C2985 这类单字母厂牌，且避免块尾漏进下一部【MP4】番号
+    nm = re.search(r"【影片名称代号】[︰：:]\s*(.+)", block)
+    if nm:
+        field = re.split(r"【", nm.group(1).strip(), maxsplit=1)[0].strip()
+        cm_name = re.search(
+            r"(?<![A-Za-z0-9])([A-Z]{1,}-?\d{2,})(?:[A-Za-z](?![A-Za-z0-9]))?(?![A-Za-z0-9])",
+            field,
+        )
+        if cm_name:
+            code = _normalize_code(cm_name.group(1))
+            title_line = field[cm_name.end() :].strip()
+    if not code:
+        cm = CODE_RE.search(first) or CODE_RE.search(block)
+        if not cm:
+            return None
+        code = _normalize_code(cm.group(1))
+
     cm_first = CODE_RE.search(first)
-    if cm_first:
+    if cm_first and not title_line:
         title_line = first[cm_first.end() :].strip()
     if not title_line:
         om = re.search(r"【原文片名】[︰：:]\s*(.+)", block)
@@ -496,12 +509,71 @@ def _img_from_html_segment(seg_html: str) -> Optional[str]:
 
 
 def _torrent_from_html_segment(seg_html: str) -> Optional[str]:
+    for m in re.finditer(
+        r'<a\b[^>]*href\s*=\s*["\']([^"\']+)["\'][^>]*>(.*?)</a>',
+        seg_html,
+        re.I | re.DOTALL,
+    ):
+        seed = seed_url_from_anchor(m.group(1).strip(), strip_html_tags(m.group(2)))
+        if seed:
+            return seed
     for m in re.finditer(r'href\s*=\s*["\']([^"\']+)["\']', seg_html, re.I):
         seed = seed_url_from_anchor(m.group(1).strip(), "")
         if seed:
             return seed
     mag = _MAGNET_RE.search(seg_html)
     return mag.group(0) if mag else None
+
+
+def _parse_code_name_pack(
+    conttpc_html: str,
+    plain: str,
+    img_urls: List[str],
+    rmdown_hrefs: List[str],
+) -> Dict[str, Any]:
+    """按【影片名称代号】切块：每部独立磁力，不把页尾 rmdown 套给全部条目。"""
+    errors: List[str] = []
+    source = conttpc_html if (conttpc_html and "【影片名称代号】" in conttpc_html) else plain
+    parts = re.split(r"(?=【影片名称代号】[︰：:])", source)
+    items: List[Dict[str, Any]] = []
+    for seg in parts:
+        if not re.search(r"【影片名称代号】[︰：:]", seg):
+            continue
+        pseg = strip_html_tags_keep_nl(seg)
+        pb = _parse_anthology_block_text(pseg) or _parse_series_block_text(pseg)
+        if not pb:
+            continue
+        it = dict(pb)
+        it["poster_url"] = _img_from_html_segment(seg)
+        torrent = _torrent_from_html_segment(seg)
+        if not torrent:
+            mag = _MAGNET_RE.search(pseg)
+            torrent = mag.group(0) if mag else None
+        it["torrent_url"] = torrent
+        items.append(it)
+
+    if items and rmdown_hrefs and all(not it.get("torrent_url") for it in items):
+        shared = rmdown_hrefs[0]
+        for it in items:
+            it["torrent_url"] = shared
+
+    poster_urls = [u for u in img_urls if _is_poster_candidate(u)]
+    for i, it in enumerate(items):
+        if not it.get("poster_url") and i < len(poster_urls):
+            it["poster_url"] = poster_urls[i]
+
+    torrent_urls = [it.get("torrent_url") for it in items if it.get("torrent_url")]
+    torrent_mode = "multi_torrent" if len(set(torrent_urls)) > 1 else "one_torrent"
+    if len(items) != len(poster_urls) and items and poster_urls:
+        errors.append(
+            f"img_count_mismatch blocks={len(items)} imgs={len(poster_urls)}"
+        )
+    return {
+        "style": "series_code_name",
+        "torrent_mode": torrent_mode,
+        "items": items,
+        "errors": errors,
+    }
 
 
 def parse_detail_series(
@@ -586,6 +658,11 @@ def parse_detail_series(
             "items": items,
             "errors": errors,
         }
+
+    # 合集：多段【影片名称代号】、无 ==== / 【原文片名】（如 40 部精选）
+    code_name_markers = len(re.findall(r"【影片名称代号】[︰：:]", plain))
+    if code_name_markers >= 2:
+        return _parse_code_name_pack(conttpc_html, plain, img_urls, rmdown_hrefs)
 
     # 单段头部 + 多番号行（detail-xilie）：用 walk 的 plain（含 br 换行），勿用压成一行的 strip
     body_plain = plain

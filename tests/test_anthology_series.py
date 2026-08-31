@@ -195,6 +195,70 @@ class TestAnthologySeriesFormat(unittest.TestCase):
         self.assertTrue(out and out.startswith("magnet:"))
         self.assertIn("9C9954F1B14117D967A5A547BC5D23EC3BF63D48", out)
 
+    def test_code_name_pack_without_equals_or_原文片名(self) -> None:
+        """7402725：多段【影片名称代号】、无 ==== / 【原文片名】，不得解析成 0 条。
+
+        每部有独立磁力；页尾那个 rmdown 往往只是第一部的 hash，不得套给全部条目。
+        """
+        mag_agav = (
+            "magnet:?xt=urn:btih:057E5024E46202521DCC3D3C67D7B759448DC0BC"
+            "&dn=bydda.cc@AGAV178"
+        )
+        mag_aldn = (
+            "magnet:?xt=urn:btih:9009095F2B41911293A554031F88BD0A8E4EE062"
+            "&dn=bydda.cc@ALDN606"
+        )
+        mag_c2985 = (
+            "magnet:?xt=urn:btih:60A8245677115F1B395A2840DD9F6720234400B8"
+            "&dn=bydda.cc@C2985"
+        )
+        mag_cead = (
+            "magnet:?xt=urn:btih:82B5BC5F6C8D78B0432FBF194AFF1FD214B362E5"
+            "&dn=bydda.cc@CEAD764"
+        )
+        pack_rmdown = (
+            "https://www.rmdown.com/link.php?hash="
+            "262057e5024e46202521dcc3d3c67d7b759448dc0bc"
+        )
+        html = f"""
+<html><body>
+<h4 class="f16">[MP4/有码]日产有码最新強片精选40部合集[08.28]</h4>
+<div id="conttpc">
+【MP4】AGAV178新片推薦 眼镜与职业角色扮演
+<br />【影片名称代号】：AGAV178 眼鏡×職業コスプレ 野々花さわ
+<br />【影片格式】：MP4
+<br />【影片大小】：1.55GB
+<br /><a href="https://2023.redircdn.com/?{mag_agav}&z">{mag_agav}</a>
+<br />【MP4】ALDN606新片推薦 受不了了
+<br />【影片名称代号】：ALDN606 辛抱堪らん 義理の娘でもおじさんは 水野優香
+<br />【影片格式】：MP4
+<br />【影片大小】：1.45GB
+<br /><a href="https://2023.redircdn.com/?{mag_aldn}&z">{mag_aldn}</a>
+<br />【MP4】C2985新片推薦 试着向认识的熟女下跪
+<br />【影片名称代号】：C2985 知り合いの熟女に土下座
+<br />【影片格式】：MP4
+<br />【影片大小】：1.53GB
+<br /><a href="https://2023.redircdn.com/?{mag_c2985}&z">{mag_c2985}</a>
+<br />【MP4】CEAD764新片推薦 巨乳熟女
+<br />【影片名称代号】：CEAD764 巨乳熟女・相河沙季
+<br />【影片格式】：MP4
+<br />【影片大小】：1.86GB
+<br /><a href="https://2023.redircdn.com/?{mag_cead}&z">{mag_cead}</a>
+<br />【0828日产有码最新強片精选】：<a href="{pack_rmdown}">{pack_rmdown}</a>
+</div>
+</body></html>
+"""
+        items = parse_detail_items(html)
+        codes = [it["code"] for it in items]
+        self.assertEqual(codes, ["AGAV-178", "ALDN-606", "C-2985", "CEAD-764"])
+        self.assertEqual(items[0]["size_gb"], "1.55")
+        self.assertEqual(items[0]["torrent_url"], mag_agav)
+        self.assertEqual(items[1]["torrent_url"], mag_aldn)
+        self.assertEqual(items[2]["torrent_url"], mag_c2985)
+        self.assertEqual(items[3]["torrent_url"], mag_cead)
+        self.assertNotIn("rmdown.com", items[0]["torrent_url"] or "")
+        self.assertEqual(len(set(codes)), 4)
+
     def test_anthology_magnet_anchors_saved_not_rmdown(self) -> None:
         mag1 = (
             "magnet:?xt=urn:btih:9C9954F1B14117D967A5A547BC5D23EC3BF63D48"

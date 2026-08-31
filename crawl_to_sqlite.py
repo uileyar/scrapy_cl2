@@ -314,6 +314,7 @@ def upsert_item(
     torrent_path: Optional[str] = None,
     source: str = "",
 ) -> None:
+    """写入番号条目。冲突时保留首次 crawled_at，避免每日补爬把列表时间刷成当天。"""
     conn.execute(
         """
         INSERT INTO items (thread_url, source, code, actress, size_gb, title, code_title,
@@ -331,7 +332,7 @@ def upsert_item(
             img_path = COALESCE(excluded.img_path, items.img_path),
             torrent_url = COALESCE(excluded.torrent_url, items.torrent_url),
             torrent_path = COALESCE(excluded.torrent_path, items.torrent_path),
-            crawled_at = excluded.crawled_at;
+            crawled_at = items.crawled_at;
         """,
         (thread_url, source, code, actress, size_gb, title, code_title, title_transfer,
          img_url, img_path, torrent_url, torrent_path, _now_iso()),

@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 
 from crawl_to_sqlite import (
     ensure_db,
@@ -143,6 +144,23 @@ class TestCrawlToSqliteResume(unittest.TestCase):
         self.assertTrue(thread_assets_complete(self.conn, "http://t"))
         self.assertEqual(list_candidate_missing_asset_rows(self.conn), [])
         self.assertEqual(list_thread_urls_with_missing_assets(self.conn), [])
+
+    def test_upsert_item_keeps_original_crawled_at(self) -> None:
+        upsert_item(self.conn, "http://t", "SORA-368", actress="星川まい")
+        first = self.conn.execute(
+            "SELECT crawled_at FROM items WHERE code = ?", ("SORA-368",)
+        ).fetchone()[0]
+        with mock.patch(
+            "crawl_to_sqlite._now_iso",
+            return_value="2099-01-01T00:00:00+00:00",
+        ):
+            upsert_item(self.conn, "http://t", "SORA-368", actress="星川まい", size_gb="7.79")
+        row = self.conn.execute(
+            "SELECT crawled_at, size_gb FROM items WHERE code = ?", ("SORA-368",)
+        ).fetchone()
+        self.assertEqual(row[0], first)
+        self.assertNotEqual(row[0], "2099-01-01T00:00:00+00:00")
+        self.assertEqual(row[1], "7.79")
 
     def test_queue_missing_uses_exists_not_magic(self) -> None:
         """Corrupt-but-present file: queue scan skips; done check still retries."""
