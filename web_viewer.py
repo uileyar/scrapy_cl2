@@ -407,6 +407,28 @@ def play_local_video(lid: int):
     return redirect(url_for("items"))
 
 
+@app.route("/items/actresses")
+def item_actresses():
+    """按女优名片段返回少量候选，供输入框提示。空查询不返回全表。"""
+    db = get_db()
+    q = request.args.get("q", "").strip()
+    source = request.args.get("source", "").strip()
+    if not q:
+        return jsonify([])
+    conds = ["actress IS NOT NULL", "actress != ''", "actress LIKE ?"]
+    params: list = [f"%{q}%"]
+    if source:
+        conds.append("source = ?")
+        params.append(source)
+    rows = db.execute(
+        "SELECT DISTINCT actress FROM items WHERE "
+        + " AND ".join(conds)
+        + " ORDER BY actress LIMIT 20",
+        params,
+    ).fetchall()
+    return jsonify([r[0] for r in rows])
+
+
 @app.route("/items")
 def items():
     db = get_db()
@@ -444,12 +466,6 @@ def items():
             "SELECT DISTINCT source FROM items WHERE source != '' ORDER BY source"
         ).fetchall()
     ]
-    actresses = [
-        r[0]
-        for r in db.execute(
-            "SELECT DISTINCT actress FROM items WHERE actress IS NOT NULL AND actress != '' ORDER BY actress LIMIT 200"
-        ).fetchall()
-    ]
 
     codes_on_page = [r["code"] for r in rows]
     local_hints = _local_hints_for_codes(db, codes_on_page)
@@ -468,7 +484,6 @@ def items():
         src_filter=source,
         actress=actress,
         sources=sources,
-        actresses=actresses,
         local_hints=local_hints,
         item_list_title=item_list_title,
     )
@@ -604,7 +619,20 @@ _BASE = """
   .page-items h1 { padding: 0 0 14px; margin-bottom: 0 }
   .filters-items { padding: 0 0 14px; margin-bottom: 12px; border-bottom: 1px solid #2d3248;
                     flex-wrap: wrap; align-items: center }
-  .filters-items input[type=text] { flex: 1; min-width: 160px }
+  .filters-items input[type=text] { flex: 0 1 420px; width: 420px; min-width: 160px; max-width: 420px }
+  .actress-field { position: relative; flex: 0 1 420px; width: 420px; min-width: 160px; max-width: 100% }
+  .filters-items .actress-field input[type=text] { width: 100%; max-width: 100%; min-width: 0; flex: none }
+  .actress-suggest {
+    position: absolute; z-index: 20; left: 0; right: 0; top: calc(100% + 4px);
+    background: #1e2130; border: 1px solid #2d3248; border-radius: 7px;
+    max-height: 240px; overflow: auto;
+  }
+  .actress-suggest button {
+    display: block; width: 100%; text-align: left; background: transparent; color: #e2e8f0;
+    border: none; border-radius: 0; padding: 8px 12px; font-size: .88rem; cursor: pointer;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .actress-suggest button:hover { background: #2d3248 }
   .items-grid {
     display: grid;
     grid-template-columns: repeat(3, 1fr);
@@ -789,10 +817,10 @@ TEMPLATE_ITEMS = _BASE.replace(
       <option value="">全部来源</option>
       {% for s in sources %}<option value="{{ s }}" {{ 'selected' if src_filter==s }}>{{ s }}</option>{% endfor %}
     </select>
-    <select name="actress" aria-label="女优" onchange="this.form.submit()">
-      <option value="">全部女优</option>
-      {% for a in actresses %}<option value="{{ a }}" {{ 'selected' if actress==a }}>{{ a }}</option>{% endfor %}
-    </select>
+    <div class="actress-field">
+      <input type="text" name="actress" id="items-actress" value="{{ actress }}" placeholder="输入女优名，回车筛选" aria-label="女优" autocomplete="off">
+      <div id="actress-suggest" class="actress-suggest" hidden></div>
+    </div>
     <a href="/items" style="padding:8px 14px;background:#1e2130;border:1px solid #2d3248;border-radius:7px;font-size:.88rem;text-decoration:none;color:#94a3b8">重置</a>
   </form>
   {% if rows %}
@@ -872,10 +900,24 @@ TEMPLATE_ITEMS = _BASE.replace(
   if (!form) return;
   var inp = document.getElementById("items-q");
   var tm;
+  var delay = 900;
+  var composing = false;
+  function schedule() {
+    clearTimeout(tm);
+    tm = setTimeout(function () { form.submit(); }, delay);
+  }
   if (inp) {
-    inp.addEventListener("input", function () {
+    inp.addEventListener("compositionstart", function () {
+      composing = true;
       clearTimeout(tm);
-      tm = setTimeout(function () { form.submit(); }, 420);
+    });
+    inp.addEventListener("compositionend", function () {
+      composing = false;
+      schedule();
+    });
+    inp.addEventListener("input", function () {
+      if (composing) return;
+      schedule();
     });
     inp.addEventListener("keydown", function (ev) {
       if (ev.key === "Enter") {
@@ -883,6 +925,81 @@ TEMPLATE_ITEMS = _BASE.replace(
         clearTimeout(tm);
         form.submit();
       }
+    });
+  }
+  var actressInp = document.getElementById("items-actress");
+  var suggest = document.getElementById("actress-suggest");
+  if (actressInp && suggest) {
+    var suggestTm;
+    var actressComposing = false;
+    function hideSuggest() {
+      suggest.hidden = true;
+      suggest.innerHTML = "";
+    }
+    function showSuggest(names) {
+      suggest.innerHTML = "";
+      if (!names.length) {
+        suggest.hidden = true;
+        return;
+      }
+      names.forEach(function (name) {
+        var b = document.createElement("button");
+        b.type = "button";
+        b.textContent = name;
+        b.title = name;
+        b.addEventListener("click", function (ev) {
+          ev.preventDefault();
+          actressInp.value = name;
+          hideSuggest();
+          form.submit();
+        });
+        suggest.appendChild(b);
+      });
+      suggest.hidden = false;
+    }
+    function fetchSuggest() {
+      var q = actressInp.value.trim();
+      if (!q) {
+        hideSuggest();
+        return;
+      }
+      var sourceEl = form.querySelector("[name=source]");
+      var src = sourceEl ? sourceEl.value : "";
+      var url = "/items/actresses?q=" + encodeURIComponent(q) + "&source=" + encodeURIComponent(src);
+      fetch(url, { credentials: "same-origin" })
+        .then(function (r) { return r.json(); })
+        .then(function (names) {
+          if (actressInp.value.trim() !== q) return;
+          showSuggest(names);
+        })
+        .catch(function () { hideSuggest(); });
+    }
+    actressInp.addEventListener("compositionstart", function () {
+      actressComposing = true;
+      clearTimeout(suggestTm);
+    });
+    actressInp.addEventListener("compositionend", function () {
+      actressComposing = false;
+      clearTimeout(suggestTm);
+      suggestTm = setTimeout(fetchSuggest, 250);
+    });
+    actressInp.addEventListener("input", function () {
+      if (actressComposing) return;
+      clearTimeout(suggestTm);
+      suggestTm = setTimeout(fetchSuggest, 250);
+    });
+    actressInp.addEventListener("keydown", function (ev) {
+      if (ev.key === "Enter" && !actressComposing) {
+        ev.preventDefault();
+        clearTimeout(suggestTm);
+        hideSuggest();
+        form.submit();
+      } else if (ev.key === "Escape") {
+        hideSuggest();
+      }
+    });
+    document.addEventListener("click", function (ev) {
+      if (!actressInp.contains(ev.target) && !suggest.contains(ev.target)) hideSuggest();
     });
   }
 })();
