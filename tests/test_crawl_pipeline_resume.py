@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import tempfile
+import threading
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -132,7 +134,7 @@ class TestCrawlPipelineResume(unittest.TestCase):
                     "torrent_url": None,
                 }
             ],
-        ), mock.patch("crawl_html.translate_code_title", return_value=None):
+        ), mock.patch("crawl_html.title_transfer_value", return_value=None):
             from crawl_html import _process_thread_full
 
             _process_thread_full(
@@ -215,7 +217,7 @@ class TestCrawlPipelineResume(unittest.TestCase):
         ), mock.patch(
             "crawl_html.download_from_rmdown_url", side_effect=boom
         ), mock.patch(
-            "crawl_html.translate_code_title", return_value=None
+            "crawl_html.title_transfer_value", return_value=None
         ):
             from crawl_html import _process_thread_full
 
@@ -313,7 +315,7 @@ class TestCrawlPipelineResume(unittest.TestCase):
         ) as image_download, mock.patch(
             "crawl_html.download_from_rmdown_url", side_effect=fake_torrent
         ) as torrent_download, mock.patch(
-            "crawl_html.translate_code_title", return_value=None
+            "crawl_html.title_transfer_value", return_value=None
         ):
             from crawl_html import _process_thread_full
 
@@ -434,3 +436,122 @@ class TestCrawlPipelineResume(unittest.TestCase):
             path = _ensure_torrent(mag, None, self.dl, "ADN-385")
             torrent_download.assert_not_called()
         self.assertIsNone(path)
+
+    def test_full_does_not_call_translate_on_critical_path(self) -> None:
+        upsert_thread(self.conn, "http://t", "T", status="pending")
+        parsed = [
+            {
+                "code": "ADN-385",
+                "code_title": "隣の人妻は僕の元カノ",
+                "actress": None,
+                "size_gb": "3.0",
+                "img_url": None,
+                "torrent_url": None,
+            }
+        ]
+        with mock.patch(
+            "crawl_html.fetch_and_parse_detail", return_value=parsed
+        ), mock.patch(
+            "crawl_html.title_transfer_value", return_value="不该出现在主路径"
+        ) as translate:
+            from crawl_html import _process_thread_full
+
+            _process_thread_full(
+                conn=self.conn,
+                thread={"url": "http://t", "title": "T", "downloads": 0},
+                day_dir=self.dl,
+                source="zz",
+                delay_sec=0,
+            )
+        translate.assert_not_called()
+        items = list_items_for_thread(self.conn, "http://t")
+        self.assertEqual(len(items), 1)
+        self.assertIsNone(items[0]["title_transfer"])
+        self.assertEqual(items[0]["code_title"], "隣の人妻は僕の元カノ")
+
+    def test_full_preserves_existing_title_transfer(self) -> None:
+        upsert_thread(self.conn, "http://t", "T", status="pending")
+        upsert_item(
+            self.conn,
+            "http://t",
+            "ADN-385",
+            code_title="隣の人妻は僕の元カノ",
+            title_transfer="隔壁人妻是我前女友",
+            size_gb="3.0",
+            source="zz",
+        )
+        parsed = [
+            {
+                "code": "ADN-385",
+                "code_title": "隣の人妻は僕の元カノ",
+                "actress": None,
+                "size_gb": "3.0",
+                "img_url": None,
+                "torrent_url": None,
+            }
+        ]
+        with mock.patch(
+            "crawl_html.fetch_and_parse_detail", return_value=parsed
+        ), mock.patch(
+            "crawl_html.title_transfer_value", return_value="不该覆盖"
+        ):
+            from crawl_html import _process_thread_full
+
+            _process_thread_full(
+                conn=self.conn,
+                thread={"url": "http://t", "title": "T", "downloads": 0},
+                day_dir=self.dl,
+                source="zz",
+                delay_sec=0,
+            )
+        items = list_items_for_thread(self.conn, "http://t")
+        self.assertEqual(items[0]["title_transfer"], "隔壁人妻是我前女友")
+
+    def test_title_worker_fills_after_download_without_blocking(self) -> None:
+        from crawl_html import TitleTransferWorker, _process_thread_full
+
+        upsert_thread(self.conn, "http://t", "T", status="pending")
+        parsed = [
+            {
+                "code": "ADN-385",
+                "code_title": "隣の人妻は僕の元カノ",
+                "actress": None,
+                "size_gb": "3.0",
+                "img_url": None,
+                "torrent_url": None,
+            }
+        ]
+        started = threading.Event()
+        release = threading.Event()
+
+        def slow_zh(code_title):
+            started.set()
+            self.assertTrue(release.wait(timeout=2))
+            return "隔壁人妻是我前女友"
+
+        worker = TitleTransferWorker(self.db, translate=slow_zh)
+        worker.start()
+        try:
+            with mock.patch("crawl_html.fetch_and_parse_detail", return_value=parsed):
+                t0 = time.monotonic()
+                _process_thread_full(
+                    conn=self.conn,
+                    thread={"url": "http://t", "title": "T", "downloads": 0},
+                    day_dir=self.dl,
+                    source="zz",
+                    delay_sec=0,
+                    title_worker=worker,
+                )
+                elapsed = time.monotonic() - t0
+            self.assertLess(elapsed, 0.5)
+            items = list_items_for_thread(self.conn, "http://t")
+            self.assertIsNone(items[0]["title_transfer"])
+            self.assertTrue(started.wait(timeout=2))
+            release.set()
+            worker.close()
+            self.conn.commit()
+            items = list_items_for_thread(self.conn, "http://t")
+            self.assertEqual(items[0]["title_transfer"], "隔壁人妻是我前女友")
+        finally:
+            release.set()
+            worker.close()

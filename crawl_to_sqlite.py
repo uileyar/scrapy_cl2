@@ -4,6 +4,7 @@ SQLite 数据层：threads 表（列表页条目）+ items 表（详情页番号
 + actress_names 表（维基女优日/中文名对照）
 + actress_names_minnano 表（みんなのAV 汉字/假名/罗马字）。
 对外 API：ensure_db、thread_exists、upsert_thread、update_thread_status、upsert_item（含 title / title_transfer）、
+update_item_title_transfer、
 replace_actress_names_from_csv、replace_minnano_actress_from_csv
 """
 from __future__ import annotations
@@ -336,6 +337,23 @@ def upsert_item(
         """,
         (thread_url, source, code, actress, size_gb, title, code_title, title_transfer,
          img_url, img_path, torrent_url, torrent_path, _now_iso()),
+    )
+    conn.commit()
+
+
+def update_item_title_transfer(
+    conn: sqlite3.Connection,
+    thread_url: str,
+    code: str,
+    title_transfer: str,
+) -> None:
+    """只更新译文，不碰资源和 crawled_at。"""
+    conn.execute(
+        """
+        UPDATE items SET title_transfer = ?
+        WHERE thread_url = ? AND code = ?
+        """,
+        (title_transfer, thread_url, code),
     )
     conn.commit()
 

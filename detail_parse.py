@@ -200,6 +200,8 @@ def extract_conttpc_html(html: str) -> str:
 
 
 _MAGNET_RE = re.compile(r"magnet:\?[^\s\"'<>]+", re.I)
+_BTIH_RE = re.compile(r"urn:btih:([0-9a-f]{32,64})", re.I)
+_RMDOWN_HASH_RE = re.compile(r"[?&]hash=([0-9a-f]+)", re.I)
 
 
 def seed_url_from_anchor(href: str, text: str = "") -> Optional[str]:
@@ -213,6 +215,38 @@ def seed_url_from_anchor(href: str, text: str = "") -> Optional[str]:
         if m:
             return m.group(0)
     return None
+
+
+def _infohash_from_seed(url: str) -> Optional[str]:
+    """从 magnet / rmdown 抽出可比对的 infohash（小写）。
+
+    rmdown 的 ``hash=`` 常带 ``26x`` 前缀，后 40 位才是 SHA-1 infohash。
+    """
+    u = (url or "").strip()
+    if not u:
+        return None
+    m = _BTIH_RE.search(u)
+    if m:
+        h = m.group(1).lower()
+        return h[-40:] if len(h) >= 40 else h
+    m = _RMDOWN_HASH_RE.search(u)
+    if m:
+        h = m.group(1).lower()
+        return h[-40:] if len(h) >= 40 else h
+    return None
+
+
+def unique_seed_count(seeds: List[str]) -> int:
+    """同一部片子的 magnet + rmdown 计为 1。无法抽出 hash 的链接按原文去重。"""
+    seen_hash: set[str] = set()
+    leftovers: set[str] = set()
+    for raw in seeds:
+        ident = _infohash_from_seed(raw)
+        if ident:
+            seen_hash.add(ident)
+        elif raw:
+            leftovers.add(raw.strip().lower())
+    return len(seen_hash) + len(leftovers)
 
 
 class ConttpcWalkParser(HTMLParser):
@@ -748,12 +782,13 @@ def parse_detail_page(html: str, topic_title: Optional[str] = None) -> Dict[str,
         plain = strip_html_tags(re.sub(r"<br\s*/?>", "\n", conttpc_html, flags=re.I))
 
     film_sizes = len(re.findall(r"【影片大小】[︰：:]", plain))
-    strong = _is_strong_series(plain, len(rmdown_hrefs), film_sizes)
+    strong = _is_strong_series(plain, unique_seed_count(rmdown_hrefs), film_sizes)
 
     if strong:
         out = parse_detail_series(conttpc_html, plain, img_urls, rmdown_hrefs)
-        out["h4_text"] = h4_text
-        return out
+        if out.get("items"):
+            out["h4_text"] = h4_text
+            return out
 
     out = parse_detail_signal(
         html,
@@ -834,7 +869,39 @@ def parse_detail_items(html: str, topic_title: Optional[str] = None) -> List[Dic
     return items
 
 
+def parse_gc_detail_item(
+    html: str,
+    topic_title: Optional[str] = None,
+    thread_url: str = "",
+) -> List[Dict[str, Any]]:
+    """fid=25 国产帖：强制单条目，不抽番号，code=tid。"""
+    from list_parse import gc_actress_from_title, tid_from_thread_url
+
+    h4_text = parse_h4_f16(html)
+    plain, img_urls, rmdown_hrefs = walk_conttpc(html)
+    raw_title = (topic_title or h4_text or "").strip()
+    title = _clean_title(raw_title) if raw_title else None
+    actress_src = topic_title or h4_text or title or ""
+    return [
+        {
+            "code": tid_from_thread_url(thread_url) or "",
+            "title": title,
+            "code_title": title,
+            "actress": gc_actress_from_title(actress_src),
+            "size_gb": (_h4_size_gb(h4_text) if h4_text else None) or _size_gb_from_plain(plain),
+            "img_url": _pick_poster_url(img_urls),
+            "torrent_url": rmdown_hrefs[0] if rmdown_hrefs else None,
+        }
+    ]
+
+
 def fetch_and_parse_detail(url: str, topic_title: Optional[str] = None) -> List[Dict[str, Any]]:
     """拉取详情页并解析，返回 ``[{"code", "code_title", "actress", "size_gb", "img_url", "torrent_url"}, ...]``。"""
     html = _fetch_html(url)
     return parse_detail_items(html, topic_title=topic_title)
+
+
+def fetch_and_parse_gc_detail(url: str, topic_title: Optional[str] = None) -> List[Dict[str, Any]]:
+    """拉取 fid=25 详情页并按 gc 规则解析为单条目。"""
+    html = _fetch_html(url)
+    return parse_gc_detail_item(html, topic_title=topic_title, thread_url=url)

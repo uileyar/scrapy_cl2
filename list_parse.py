@@ -12,6 +12,14 @@ from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 
 from http_fetch import fetch_html as _fetch_html
 
+# source=gc 列表标题关键词（OR）；nana 用字母边界，避免 banana
+GC_TITLE_KEYWORDS = ("苏畅", "娜娜", "nana", "短剧", "AI真人")
+_GC_TRAD_TO_SIMP = str.maketrans({"蘇": "苏", "暢": "畅", "劇": "剧"})
+_GC_NANA_RE = re.compile(r"(?<![A-Za-z])nana(?![A-Za-z])", re.I)
+_GC_AI_REAL_RE = re.compile(r"ai\s*真人", re.I)
+_PATH_TID_RE = re.compile(r"/(\d{4,})\.html$", re.I)
+_QUERY_TID_RE = re.compile(r"(?:^|&)tid=(\d+)", re.I)
+
 
 _TITLE_REMOVE = re.compile(
     r"\[中字\]|\[中文字幕\]|《FHD中文》|\[HD\]|\[有碼高清中文字幕\]"
@@ -24,6 +32,46 @@ def clean_title(title: str) -> str:
     title = _TITLE_REMOVE.sub("", title)
     title = re.sub(r"\s+", " ", title).strip()
     return title
+
+
+def _normalize_gc_title(title: str) -> str:
+    return (title or "").translate(_GC_TRAD_TO_SIMP)
+
+
+def title_matches_gc(title: str) -> bool:
+    """标题是否含 gc 关键词（苏畅/娜娜/nana/短剧/AI真人，繁简与大小写已处理）。"""
+    raw = title or ""
+    norm = _normalize_gc_title(raw)
+    if "苏畅" in norm or "娜娜" in norm or "短剧" in norm:
+        return True
+    if _GC_AI_REAL_RE.search(norm):
+        return True
+    return bool(_GC_NANA_RE.search(raw))
+
+
+def gc_actress_from_title(title: str) -> Optional[str]:
+    """从标题归出 actress：苏畅 或 娜娜；未命中返回 None。"""
+    raw = title or ""
+    norm = _normalize_gc_title(raw)
+    if "苏畅" in norm:
+        return "苏畅"
+    if "娜娜" in norm or _GC_NANA_RE.search(raw):
+        return "娜娜"
+    return None
+
+
+def tid_from_thread_url(url: str) -> Optional[str]:
+    """从详情 URL 取帖子 tid：``.../7406816.html`` 或 ``read.php?tid=``。"""
+    if not url:
+        return None
+    parsed = urlparse(url)
+    m = _QUERY_TID_RE.search(parsed.query or "")
+    if m:
+        return m.group(1)
+    m = _PATH_TID_RE.search(parsed.path or "")
+    if m:
+        return m.group(1)
+    return None
 
 
 def normalize_url(base_url: str, raw_url: str) -> str:

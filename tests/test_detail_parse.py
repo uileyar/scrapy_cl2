@@ -325,6 +325,40 @@ class TestDetailParseOffline(unittest.TestCase):
         self.assertEqual(items[0]["img_url"], poster)
         self.assertIn("rmdown.com", items[0]["torrent_url"] or "")
 
+    def test_signal_magnet_plus_rmdown_same_hash_not_empty(self) -> None:
+        """7412573：单片同时挂 magnet 与 rmdown，不得当合集解析成 0 条。"""
+        mag = (
+            "magnet:?xt=urn:btih:6907B7476E157B05F6BF75A3EB2729C3DD050A58"
+            "&dn=bydda.cc@BBAN601"
+        )
+        rmdown = (
+            "https://www.rmdown.com/link.php?hash="
+            "2636907b7476e157b05f6bf75a3eb2729c3dd050a58"
+        )
+        poster = (
+            "https://picdcd.com/upload/files/2026/09/04/2026090419255158a2fc.jpg"
+        )
+        html = f"""
+        <h4 class="f16">[MP4]BBAN601 家中各处毫无遮掩地露出私处 巴煇 桃瀬日葵</h4>
+        <div id="conttpc" class="tpc_content">
+          <img ess-data="https://avspda.xyz/upload/ads/202307281436545fd0b3.gif" />
+          <img ess-data="{poster}" />
+          <br />【影片名称代号】：BBAN-601 家中どこでもオマ●コ丸出し
+          <br />【影片大小】：2.30GB
+          <br />【磁力链接】:<a href="https://2023.redircdn.com/?{mag}&z">{mag}</a>
+          <br /><a class="sgreen" id="rmlink" href="{rmdown}">{rmdown}</a>
+        </div>
+        """
+        page = parse_detail_page(html)
+        self.assertEqual(page["style"], "signal")
+        items = parse_detail_items(html)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["code"], "BBAN-601")
+        self.assertEqual(items[0]["size_gb"], "2.30")
+        self.assertEqual(items[0]["img_url"], poster)
+        tor = items[0]["torrent_url"] or ""
+        self.assertTrue(tor.startswith("magnet:") or "rmdown.com" in tor)
+
     def test_signal_atid663(self) -> None:
         html = _read("detail-signal.html")
         r = parse_detail_page(html)

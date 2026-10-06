@@ -7,10 +7,12 @@ from __future__ import annotations
 
 import argparse
 import logging
+import queue
 import re
 import socket
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -29,15 +31,21 @@ from crawl_to_sqlite import (
     resume_since_iso,
     thread_assets_complete,
     thread_exists,
+    update_item_title_transfer,
     update_thread_status,
     upsert_item,
     upsert_thread,
 )
-from detail_parse import fetch_and_parse_detail
+from detail_parse import fetch_and_parse_detail, fetch_and_parse_gc_detail
 from image_download import download_image_from_url
-from list_parse import build_list_page_url, fetch_and_parse_list_page
+from list_parse import (
+    build_list_page_url,
+    fetch_and_parse_list_page,
+    tid_from_thread_url,
+    title_matches_gc,
+)
 from rmdown_download import download_from_rmdown_url
-from title_translate import translate_code_title
+from title_translate import title_transfer_value, translation_circuit_open
 from local_assets import (
     is_valid_image_file,
     is_valid_torrent_file,
@@ -50,6 +58,7 @@ log = logging.getLogger(__name__)
 SOURCE_URL_MAP: dict[str, str] = {
     "zz": "https://www.t66y.com/thread0806.php?fid=26",
     "ym": "https://www.t66y.com/thread0806.php?fid=15",
+    "gc": "https://www.t66y.com/thread0806.php?fid=25",
 }
 
 # ── 代理自启 ──────────────────────────────────────────────
@@ -286,6 +295,60 @@ def _ensure_torrent(
         return None
 
 
+class TitleTransferWorker:
+    """后台补译 title_transfer，不阻塞下载主循环。"""
+
+    def __init__(self, db_path: Path, *, translate=None) -> None:
+        self._db_path = Path(db_path)
+        self._translate = translate or title_transfer_value
+        self._q: queue.Queue = queue.Queue()
+        self._thread: threading.Thread | None = None
+        self._closed = False
+
+    def start(self) -> None:
+        if self._thread is not None:
+            return
+        self._thread = threading.Thread(
+            target=self._run, name="title-transfer", daemon=True
+        )
+        self._thread.start()
+
+    def submit(self, thread_url: str, code: str, code_title: str | None) -> None:
+        if self._closed:
+            return
+        self._q.put((thread_url, code, code_title))
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._q.put(None)
+        if self._thread is not None:
+            self._thread.join()
+            self._thread = None
+
+    def _run(self) -> None:
+        conn = ensure_db(self._db_path)
+        try:
+            while True:
+                job = self._q.get()
+                try:
+                    if job is None:
+                        return
+                    if translation_circuit_open():
+                        continue
+                    thread_url, code, code_title = job
+                    zh = self._translate(code_title)
+                    if zh:
+                        update_item_title_transfer(conn, thread_url, code, zh)
+                except Exception:
+                    log.exception("title_transfer 补译失败")
+                finally:
+                    self._q.task_done()
+        finally:
+            conn.close()
+
+
 def _process_thread_full(
     *,
     conn,
@@ -293,16 +356,24 @@ def _process_thread_full(
     day_dir: Path,
     source: str,
     delay_sec: float,
+    title_worker: TitleTransferWorker | None = None,
 ) -> None:
     detail_url = thread["url"]
     try:
-        items = fetch_and_parse_detail(detail_url, topic_title=thread.get("title"))
+        if source == "gc":
+            items = fetch_and_parse_gc_detail(
+                detail_url, topic_title=thread.get("title")
+            )
+        else:
+            items = fetch_and_parse_detail(
+                detail_url, topic_title=thread.get("title")
+            )
     except Exception as exc:
         log.error("详情页请求失败 %s: %s", detail_url, exc)
         update_thread_status(conn, detail_url, "pending")
         return
     if not items:
-        log.warning("未解析到番号条目 %s", detail_url)
+        log.warning("未解析到条目 %s", detail_url)
         update_thread_status(conn, detail_url, "pending")
         return
 
@@ -314,11 +385,13 @@ def _process_thread_full(
 
     for item in items:
         size_gb = item.get("size_gb")
-        if size_gb and float(size_gb) <= 1.5:
+        if source != "gc" and size_gb and float(size_gb) <= 1.5:
             filtered += 1
             continue
         kept += 1
-        code = item.get("code") or "unknown"
+        code = item.get("code") or (
+            tid_from_thread_url(detail_url) if source == "gc" else None
+        ) or "unknown"
         prior = existing_items.get(code, {})
         code_title = item.get("code_title") or code
         safe_name = _sanitize_filename(code_title)
@@ -332,15 +405,13 @@ def _process_thread_full(
         torrent_path = _ensure_torrent(
             item.get("torrent_url"), prior.get("torrent_path"), save_dir, safe_name
         )
-        translated = (translate_code_title(item.get("code_title")) or "").strip()
-        title_transfer = translated if translated and translated != (item.get("code_title") or "").strip() else None
         upsert_item(
             conn,
             thread_url=detail_url,
             code=code,
             title=item.get("title"),
             code_title=item.get("code_title"),
-            title_transfer=title_transfer,
+            title_transfer=None,
             actress=item.get("actress"),
             size_gb=size_gb,
             img_url=item.get("img_url"),
@@ -349,6 +420,12 @@ def _process_thread_full(
             torrent_path=torrent_path,
             source=source,
         )
+        if (
+            title_worker is not None
+            and source != "gc"
+            and not (prior.get("title_transfer") or "").strip()
+        ):
+            title_worker.submit(detail_url, code, item.get("code_title"))
         if delay_sec > 0:
             time.sleep(delay_sec)
 
@@ -447,6 +524,8 @@ def crawl_pipeline(
     day_dir.mkdir(parents=True, exist_ok=True)
 
     conn = ensure_db(db_path)
+    worker = TitleTransferWorker(db_path)
+    worker.start()
     try:
         # ── 1.1 ~ 1.4：遍历列表分页，收集未入库的 thread ──
         all_threads: list[dict] = []
@@ -460,6 +539,8 @@ def crawl_pipeline(
 
             new_count = 0
             for row in rows:
+                if source == "gc" and not title_matches_gc(row.get("title") or ""):
+                    continue
                 if thread_exists(conn, row["url"]):
                     continue
                 all_threads.append(row)
@@ -496,6 +577,7 @@ def crawl_pipeline(
                 _process_thread_full(
                     conn=conn, thread=thread, day_dir=day_dir,
                     source=source, delay_sec=delay_sec,
+                    title_worker=worker,
                 )
             else:
                 _process_thread_patch(
@@ -508,6 +590,7 @@ def crawl_pipeline(
                 )
 
     finally:
+        worker.close()
         conn.close()
 
     log.info("DONE SQLite: %s | 下载目录: %s", db_path, day_dir)
